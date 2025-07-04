@@ -1,0 +1,50 @@
+use ed25519_dalek;
+
+use anyhow::Result;
+use bincode::{Decode, Encode};
+use ed25519_dalek::Signature;
+use ed25519_dalek::ed25519::SignatureBytes;
+use ed25519_dalek::ed25519::signature::SignerMut;
+use ed25519_dalek::{SigningKey, Verifier, VerifyingKey};
+use rand::rngs::OsRng;
+
+pub type NodeId = [u8; 32];
+
+#[derive(Clone, Encode, Decode, Debug, PartialEq, Eq)]
+pub struct PublicIdentity {
+    public_key: NodeId,
+}
+
+#[derive(Clone)]
+pub struct PrivateIdentity {
+    private_key: [u8; 32],
+    pub public_id: PublicIdentity,
+}
+
+impl PublicIdentity {
+    pub fn verify(&self, msg: Vec<u8>, signature: &SignatureBytes) -> Result<bool> {
+        let verifying_key = VerifyingKey::from_bytes(&self.public_key)?;
+        let signature = Signature::from_bytes(signature);
+        Ok(verifying_key.verify(msg.as_slice(), &signature).is_ok())
+    }
+}
+
+impl PrivateIdentity {
+    pub fn new() -> Self {
+        let mut csprng = OsRng;
+        let signing_key: SigningKey = SigningKey::generate(&mut csprng);
+        let verifying_key: VerifyingKey = signing_key.verifying_key();
+        Self {
+            private_key: *signing_key.as_bytes(),
+            public_id: PublicIdentity {
+                public_key: *verifying_key.as_bytes(),
+            },
+        }
+    }
+
+    pub fn sign(&self, msg: Vec<u8>) -> SignatureBytes {
+        let mut signing_key: SigningKey = SigningKey::from_bytes(&self.private_key);
+        let signature = signing_key.sign(msg.as_slice());
+        signature.to_bytes()
+    }
+}
