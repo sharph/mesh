@@ -168,11 +168,11 @@ async fn run_websockets_connection<S>(
     mut wss: WebSocketStream<S>,
     id: PrivateIdentity,
     inbound: bool,
-) -> Result<UntaggedConnection>
+) -> Result<(UntaggedConnection, Option<PublicIdentity>)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    handshake(&mut wss, &id, inbound).await?;
+    let their_id = handshake(&mut wss, &id, inbound).await?;
     let (in_tx, in_rx) = mpsc::channel(64);
     let (out_tx, mut out_rx) = mpsc::channel::<RawMessage>(64);
 
@@ -201,11 +201,11 @@ where
             }
         }
     });
-    Ok(UntaggedConnection(out_tx, in_rx, inbound))
+    Ok((UntaggedConnection(out_tx, in_rx, inbound), Some(their_id)))
 }
 
 pub async fn connect_websockets<A>(
-    connection_sender: mpsc::Sender<UntaggedConnection>,
+    connection_sender: mpsc::Sender<(UntaggedConnection, Option<PublicIdentity>)>,
     id: PrivateIdentity,
     addr: A,
 ) -> Result<()>
@@ -225,7 +225,7 @@ where
 }
 
 pub async fn listen_websockets<A>(
-    connection_sender: mpsc::Sender<UntaggedConnection>,
+    connection_sender: mpsc::Sender<(UntaggedConnection, Option<PublicIdentity>)>,
     id: PrivateIdentity,
     addr: A,
 ) -> Result<JoinHandle<Result<()>>>

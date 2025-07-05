@@ -83,6 +83,7 @@ pub struct UntaggedConnection(
     pub mpsc::Receiver<RawMessage>,
     pub bool,
 );
+
 pub struct TaggedConnection(
     mpsc::Sender<RawMessage>,
     mpsc::UnboundedReceiver<TaggedRawMessage>,
@@ -90,6 +91,7 @@ pub struct TaggedConnection(
 
 struct Connection {
     connection_id: ConnectionId,
+    id: Option<PublicIdentity>,
     tx: Option<mpsc::Sender<RawMessage>>,
     inbound: bool,
 }
@@ -147,13 +149,22 @@ impl RouterState {
 fn add_connection(
     rs: &mut RouterState,
     connection: UntaggedConnection,
+    id: Option<PublicIdentity>,
     router_msg_tx: mpsc::Sender<TaggedRawMessage>,
 ) -> Result<()> {
-    let id = ConnectionId(rs.connections.len() as u64);
+    let conn_id = ConnectionId(rs.connections.len() as u64);
     let inbound = connection.2;
-    let TaggedConnection(tx, mut rx) = tag_connection(connection, id);
+    let TaggedConnection(tx, mut rx) = tag_connection(connection, conn_id);
+    if let Some(some_id) = &id {
+        if inbound {
+            println!("adding new connection from {}", some_id.base64());
+        } else {
+            println!("adding new connection to {}", some_id.base64());
+        }
+    }
     rs.connections.push(Connection {
-        connection_id: id,
+        connection_id: conn_id,
+        id,
         tx: Some(tx),
         inbound,
     });
@@ -187,11 +198,15 @@ fn send_keepalive(rs: &mut RouterState) {
 enum RouterControl {}
 
 pub async fn run_router(settings: &Config) -> Result<()> {
-    let (connection_tx, mut connection_rx) = mpsc::channel::<UntaggedConnection>(64);
+    let (connection_tx, mut connection_rx) =
+        mpsc::channel::<(UntaggedConnection, Option<PublicIdentity>)>(64);
     let (router_msg_tx, mut router_msg_rx) = mpsc::channel::<TaggedRawMessage>(64);
 
     let this_id = crypto::PrivateIdentity::new();
     let id = this_id.clone();
+
+    println!("public id: {}", id.public_id);
+    println!("private key: {}", id.base64());
 
     let mut state = RouterState::new(this_id.clone());
 
@@ -205,7 +220,7 @@ pub async fn run_router(settings: &Config) -> Result<()> {
     if let Ok(addr) = settings.get_string("websockets_connect") {
         println!("connecting to {:?}", addr);
         let connection_sender = connection_tx.clone();
-        connect_websockets(connection_sender, id.clone(), addr).await?;
+        tokio::spawn(connect_websockets(connection_sender, id.clone(), addr));
     }
 
     let (tx, mut keepalive_rx) = mpsc::channel(1);
@@ -219,8 +234,8 @@ pub async fn run_router(settings: &Config) -> Result<()> {
 
     loop {
         tokio::select! {
-            Some(val) = connection_rx.recv() => {
-                add_connection(&mut state, val, router_msg_tx.clone())?;
+            Some((conn, id)) = connection_rx.recv() => {
+                add_connection(&mut state, conn, id, router_msg_tx.clone())?;
             }
             Some(val) = router_msg_rx.recv() => {
                 println!("{:?}", val);

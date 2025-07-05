@@ -1,12 +1,14 @@
 use ed25519_dalek;
 
 use anyhow::Result;
+use base64::prelude::*;
 use bincode::{Decode, Encode};
 use ed25519_dalek::Signature;
 use ed25519_dalek::ed25519::SignatureBytes;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
+use std::fmt::{self, write};
 
 pub type NodeId = [u8; 32];
 
@@ -15,7 +17,15 @@ pub struct PublicIdentity {
     public_key: NodeId,
 }
 
-#[derive(Clone)]
+impl PublicIdentity {}
+
+impl std::fmt::Display for PublicIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.base64())
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct PrivateIdentity {
     private_key: [u8; 32],
     pub public_id: PublicIdentity,
@@ -26,6 +36,10 @@ impl PublicIdentity {
         let verifying_key = VerifyingKey::from_bytes(&self.public_key)?;
         let signature = Signature::from_bytes(signature);
         Ok(verifying_key.verify(msg.as_slice(), &signature).is_ok())
+    }
+
+    pub fn base64(&self) -> String {
+        BASE64_STANDARD.encode(self.public_key)
     }
 }
 
@@ -46,5 +60,9 @@ impl PrivateIdentity {
         let mut signing_key: SigningKey = SigningKey::from_bytes(&self.private_key);
         let signature = signing_key.sign(msg.as_slice());
         signature.to_bytes()
+    }
+
+    pub fn base64(&self) -> String {
+        BASE64_STANDARD.encode(self.private_key)
     }
 }
