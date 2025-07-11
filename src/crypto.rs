@@ -12,7 +12,7 @@ use std::fmt::{self, write};
 
 pub type NodeId = [u8; 32];
 
-#[derive(Clone, Encode, Decode, Debug, PartialEq, Eq)]
+#[derive(Clone, Encode, Decode, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicIdentity {
     public_key: NodeId,
 }
