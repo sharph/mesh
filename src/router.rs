@@ -101,7 +101,7 @@ impl FloodDB {
     fn update(&mut self, entry: FloodDBEntry) -> bool {
         let instant = Instant::now();
         let mut updated = false;
-        if let Some(old_instant) = self.db.insert(entry.clone(), instant.clone()) {
+        if let Some(old_instant) = self.db.insert(entry.clone(), instant) {
             self.instants.remove(&old_instant).unwrap();
             updated = true
         }
@@ -122,7 +122,7 @@ struct RouteDB(BTreeMap<PublicIdentity, RouteDBEntry>);
 impl RouteDB {
     fn is_route_in_db(&self, id: &PublicIdentity, route: &Route) -> bool {
         if let Some(db_entry) = self.0.get(id) {
-            db_entry.seen.get(route).is_some()
+            db_entry.seen.contains_key(route)
         } else {
             false
         }
@@ -224,7 +224,7 @@ impl RouterState {
             let in_flood_db = self
                 .flood_db
                 .update(FloodDBEntry::new(from_id.clone(), msg.payload.clone()));
-            let best_in_route_db = self.route_db.observe_route(&from_id, &msg.route);
+            let best_in_route_db = self.route_db.observe_route(from_id, &msg.route);
             if (in_flood_db && best_in_route_db) || (msg.ttl as usize) < msg.route.len() {
                 return Ok(());
             }
@@ -267,9 +267,8 @@ impl RouterState {
     fn handle_message(&mut self, msg: TaggedRawMessage) -> Result<()> {
         let conn = msg.connection_id;
         let msg = MeshMessage::try_from(msg.msg)?;
-        match msg.payload {
-            MessagePayload::Flood(_) => self.handle_flood(&msg, conn)?,
-            _ => {}
+        if let MessagePayload::Flood(_) = msg.payload {
+            self.handle_flood(&msg, conn)?
         }
         Ok(())
     }
@@ -288,15 +287,11 @@ pub async fn run_router(settings: &Config) -> Result<()> {
 
     let mut state = RouterState::new(this_id.clone());
 
-    let mut websocket_listener = None;
     if let Ok(addr) = settings.get_string("websockets_listen") {
-        println!("listening on {:?}", addr);
-        let connection_sender = connection_tx.clone();
-        websocket_listener = Some(listen_websockets(connection_sender, id.clone(), addr).await?);
+        println!("listening on {addr:?}");
     }
-
     if let Ok(addr) = settings.get_string("websockets_connect") {
-        println!("connecting to {:?}", addr);
+        println!("connecting to {addr:?}");
         let connection_sender = connection_tx.clone();
         tokio::spawn(connect_websockets(connection_sender, id.clone(), addr));
     }

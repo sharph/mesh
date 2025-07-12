@@ -1,10 +1,10 @@
 use anyhow::{Result, anyhow};
 use bincode::{Decode, Encode};
 use ed25519_dalek::ed25519::SignatureBytes;
-use futures_util::{Sink, SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use rand::rngs::OsRng;
-use tokio::net::{TcpListener, TcpSocket, TcpStream, ToSocketAddrs};
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_websockets::{ClientBuilder, ServerBuilder, WebSocketStream};
@@ -30,7 +30,7 @@ impl HelloMessage {
         Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 
-    fn to_signed_message(self, id: &PrivateIdentity) -> Result<SignedMessage> {
+    fn into_signed_message(self, id: &PrivateIdentity) -> Result<SignedMessage> {
         let signature = id.sign(self.to_vec()?);
         Ok(SignedMessage {
             message: self,
@@ -73,7 +73,7 @@ async fn handshake_challenge<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let hello = HelloMessage::new(id.public_id.clone()).to_signed_message(&id)?;
+    let hello = HelloMessage::new(id.public_id.clone()).into_signed_message(id)?;
     wss.send(tokio_websockets::Message::binary(hello.to_vec()?))
         .await?;
     Ok(hello)
@@ -100,7 +100,7 @@ where
         nonce: challenge.message.nonce,
     };
     wss.send(tokio_websockets::Message::binary(
-        res.to_signed_message(&id)?.to_vec()?,
+        res.into_signed_message(id)?.to_vec()?,
     ))
     .await?;
     Ok(challenge.message.id)
@@ -123,8 +123,8 @@ where
         return Err(anyhow!("invalid signature"));
     }
     if challenge.message.nonce != response.message.nonce {
-        println!("{:?}", challenge);
-        println!("{:?}", response);
+        println!("{challenge:?}");
+        println!("{challenge:?}");
         return Err(anyhow!("nonce doesn't match"));
     }
     Ok(response.message.id)
@@ -232,7 +232,7 @@ where
                     }
                     Err(err) => {
                         println!("handshake not successful");
-                        println!("{:?}", err);
+                        println!("{err:?}");
                     }
                 }
             });
