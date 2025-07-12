@@ -130,38 +130,20 @@ where
     Ok(response.message.id)
 }
 
-async fn handshake<S>(
-    wss: &mut WebSocketStream<S>,
-    id: &PrivateIdentity,
-    inbound: bool,
-) -> Result<PublicIdentity>
+async fn handshake<S>(wss: &mut WebSocketStream<S>, id: &PrivateIdentity) -> Result<PublicIdentity>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    if inbound {
-        println!("sending challenge");
-        let challenge = handshake_challenge(wss, id).await?;
-        println!("verifying");
-        let pub_id = handshake_verify_response(wss, &challenge).await?;
-        println!("responding to challenge");
-        let pub_id_2 = handshake_response(wss, id).await?;
-        if pub_id == pub_id_2 {
-            Ok(pub_id)
-        } else {
-            Err(anyhow!("pub id doesn't match"))
-        }
+    println!("sending challenge");
+    let challenge = handshake_challenge(wss, id).await?;
+    println!("responding to challenge");
+    let pub_id_2 = handshake_response(wss, id).await?;
+    println!("verifying");
+    let pub_id = handshake_verify_response(wss, &challenge).await?;
+    if pub_id == pub_id_2 {
+        Ok(pub_id)
     } else {
-        println!("responding to challenge");
-        let pub_id = handshake_response(wss, id).await?;
-        println!("sending challenge");
-        let challenge = handshake_challenge(wss, id).await?;
-        println!("verifying");
-        let pub_id_2 = handshake_verify_response(wss, &challenge).await?;
-        if pub_id == pub_id_2 {
-            Ok(pub_id)
-        } else {
-            Err(anyhow!("pub id doesn't match"))
-        }
+        Err(anyhow!("pub id doesn't match"))
     }
 }
 
@@ -173,7 +155,7 @@ async fn run_websockets_connection<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let their_id = handshake(&mut wss, &id, inbound).await?;
+    let their_id = handshake(&mut wss, &id).await?;
     let (in_tx, in_rx) = mpsc::channel(64);
     let (out_tx, mut out_rx) = mpsc::channel::<RawMessage>(64);
 
@@ -183,24 +165,22 @@ where
             let from_router = out_rx.recv();
             tokio::select! {
                 Some(Ok(msg)) = from_ws => {
-                    if msg.is_binary() {
-                        let _ = in_tx.send(RawMessage(msg.into_payload().to_vec())).await;
-                    } else if msg.is_text() {
-                        let _ = in_tx.send(RawMessage(msg.into_payload().to_vec())).await;
+                    if (msg.is_binary() || msg.is_text())
+                            && in_tx.send(RawMessage(msg.into_payload().to_vec())).await.is_err() {
+                        break;
                     }
                 }
                 Some(msg) = from_router => {
                     if wss.send(tokio_websockets::Message::binary(msg.0)).await.is_err() {
-                        println!("disconnected");
-                        return;
+                        break;
                     }
                 }
                 else => {
-                    println!("disconnected");
-                    return;
+                    break;
                 }
             }
         }
+        println!("disconnected");
     });
     Ok((UntaggedConnection(out_tx, in_rx, inbound), Some(their_id)))
 }
