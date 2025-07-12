@@ -2,8 +2,8 @@ use anyhow::Result;
 use config::Config;
 
 mod crypto;
-mod node;
 mod proto;
+mod router;
 mod websockets;
 
 #[tokio::main]
@@ -13,6 +13,6 @@ async fn main() -> Result<()> {
         .add_source(config::Environment::with_prefix("MESH"))
         .build()
         .unwrap();
-    node::run_router(&settings).await?;
+    router::run_router(&settings).await?;
     Ok(())
 }
