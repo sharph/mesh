@@ -288,114 +288,113 @@ impl RouterState {
             flood_db: FloodDB::default(),
         }
     }
-}
 
-fn add_connection(
-    rs: &mut RouterState,
-    connection: UntaggedConnection,
-    id: Option<PublicIdentity>,
-    router_msg_tx: mpsc::Sender<TaggedRawMessage>,
-) -> Result<()> {
-    let conn_id = ConnectionId(rs.connections.len() as u64);
-    let inbound = connection.2;
-    let TaggedConnection(tx, mut rx) = tag_connection(connection, conn_id);
-    if let Some(some_id) = &id {
-        if inbound {
-            println!("adding new connection from {}", some_id.base64());
-        } else {
-            println!("adding new connection to {}", some_id.base64());
-        }
-    }
-    rs.connections.push(Connection {
-        connection_id: conn_id,
-        id,
-        tx: Some(tx),
-        inbound,
-    });
-    tokio::spawn(async move {
-        loop {
-            if let Some(msg) = rx.recv().await {
-                if router_msg_tx.send(msg).await.is_err() {
-                    return;
-                }
+    fn add_connection(
+        &mut self,
+        connection: UntaggedConnection,
+        id: Option<PublicIdentity>,
+        router_msg_tx: mpsc::Sender<TaggedRawMessage>,
+    ) -> Result<()> {
+        let conn_id = ConnectionId(self.connections.len() as u64);
+        let inbound = connection.2;
+        let TaggedConnection(tx, mut rx) = tag_connection(connection, conn_id);
+        if let Some(some_id) = &id {
+            if inbound {
+                println!("adding new connection from {}", some_id.base64());
+            } else {
+                println!("adding new connection to {}", some_id.base64());
             }
         }
-    });
-    Ok(())
-}
+        self.connections.push(Connection {
+            connection_id: conn_id,
+            id,
+            tx: Some(tx),
+            inbound,
+        });
+        tokio::spawn(async move {
+            loop {
+                if let Some(msg) = rx.recv().await {
+                    if router_msg_tx.send(msg).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
 
-fn send_to_all(rs: &mut RouterState, msg: MeshMessage, except: Option<ConnectionId>) -> Result<()> {
-    let raw_message = RawMessage::try_from(msg)?;
-    for connection in rs.connections.iter_mut() {
-        if Some(connection.connection_id) == except {
-            continue;
+    fn send_to_all(&mut self, msg: MeshMessage, except: Option<ConnectionId>) -> Result<()> {
+        let raw_message = RawMessage::try_from(msg)?;
+        for connection in self.connections.iter_mut() {
+            if Some(connection.connection_id) == except {
+                continue;
+            }
+            let _ = connection.send_message(raw_message.clone());
         }
-        let _ = connection.send_message(raw_message.clone());
+        Ok(())
     }
-    Ok(())
-}
 
-fn handle_flood(rs: &mut RouterState, msg: &MeshMessage, from: ConnectionId) -> Result<()> {
-    let mut msg = msg.clone();
-    if !msg.signature_valid()? {
-        bail!("signature invalid");
-    }
-    // TODO: check flood time
-    // TODO: enforce a local ttl
-    if let Some(from_id) = &msg.from {
-        println!("got flood from {}", from_id.base64());
-        let in_flood_db = rs
-            .flood_db
-            .update(FloodDBEntry::new(from_id.clone(), msg.payload.clone()));
-        let best_in_route_db = rs.route_db.observe_route(&from_id, &msg.route);
-        if (in_flood_db && best_in_route_db) || (msg.ttl as usize) < msg.route.len() {
-            // message already seen
-            return Ok(());
+    fn handle_flood(&mut self, msg: &MeshMessage, from: ConnectionId) -> Result<()> {
+        let mut msg = msg.clone();
+        if !msg.signature_valid()? {
+            bail!("signature invalid");
         }
-        msg.route.push_front(from);
-        send_to_all(rs, msg.clone(), Some(from))?;
+        // TODO: check flood time
+        // TODO: enforce a local ttl
+        if let Some(from_id) = &msg.from {
+            println!("got flood from {}", from_id.base64());
+            let in_flood_db = self
+                .flood_db
+                .update(FloodDBEntry::new(from_id.clone(), msg.payload.clone()));
+            let best_in_route_db = self.route_db.observe_route(&from_id, &msg.route);
+            if (in_flood_db && best_in_route_db) || (msg.ttl as usize) < msg.route.len() {
+                return Ok(());
+            }
+            msg.route.push_front(from);
+            self.send_to_all(msg.clone(), Some(from))?;
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-async fn send_keepalive(rs: &mut RouterState) {
-    let hb = RawMessage::try_from(MeshMessage {
-        from: None,
-        to: None,
-        ttl: 0,
-        route: Route::default(),
-        payload: MessagePayload::Noop,
-        signature: None,
-    })
-    .unwrap();
-    for connection in rs.connections.iter_mut() {
-        let _ = connection.send_message(hb.clone());
+    async fn send_keepalive(&mut self) {
+        let hb = RawMessage::try_from(MeshMessage {
+            from: None,
+            to: None,
+            ttl: 0,
+            route: Route::default(),
+            payload: MessagePayload::Noop,
+            signature: None,
+        })
+        .unwrap();
+        for connection in self.connections.iter_mut() {
+            let _ = connection.send_message(hb.clone());
+        }
     }
-}
 
-fn send_flood(rs: &mut RouterState) -> Result<()> {
-    let mut msg = MeshMessage {
-        from: Some(rs.id.public_id.clone()),
-        to: None,
-        ttl: DEFAULT_TTL,
-        route: Route::default(),
-        payload: MessagePayload::Flood(std::time::SystemTime::now()),
-        signature: None,
-    };
-    println!("sending flood from {}", msg.from.clone().unwrap().base64());
-    msg.sign(&rs.id)?;
-    send_to_all(rs, msg, None)?;
-    Ok(())
-}
-
-fn handle_message(rs: &mut RouterState, msg: TaggedRawMessage) -> Result<()> {
-    let conn = msg.connection_id;
-    let msg = MeshMessage::try_from(msg.msg)?;
-    match msg.payload {
-        MessagePayload::Flood(_) => handle_flood(rs, &msg, conn)?,
-        _ => {}
+    fn send_flood(&mut self) -> Result<()> {
+        let mut msg = MeshMessage {
+            from: Some(self.id.public_id.clone()),
+            to: None,
+            ttl: DEFAULT_TTL,
+            route: Route::default(),
+            payload: MessagePayload::Flood(std::time::SystemTime::now()),
+            signature: None,
+        };
+        println!("sending flood from {}", msg.from.clone().unwrap().base64());
+        msg.sign(&self.id)?;
+        self.send_to_all(msg, None)?;
+        Ok(())
     }
-    Ok(())
+
+    fn handle_message(&mut self, msg: TaggedRawMessage) -> Result<()> {
+        let conn = msg.connection_id;
+        let msg = MeshMessage::try_from(msg.msg)?;
+        match msg.payload {
+            MessagePayload::Flood(_) => self.handle_flood(&msg, conn)?,
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 pub async fn run_router(settings: &Config) -> Result<()> {
@@ -436,13 +435,13 @@ pub async fn run_router(settings: &Config) -> Result<()> {
     loop {
         tokio::select! {
             Some((conn, id)) = connection_rx.recv() => {
-                add_connection(&mut state, conn, id, router_msg_tx.clone())?;
+                state.add_connection(conn, id, router_msg_tx.clone())?;
             }
             Some(val) = router_msg_rx.recv() => {
-                handle_message(&mut state, val);
+                let _ = state.handle_message(val);
             }
             _ = flood_rx.recv() => {
-                send_flood(&mut state);
+                let _ = state.send_flood();
             }
         }
     }
