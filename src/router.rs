@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use config::Config;
 use tokio::sync::mpsc;
 
 use crate::crypto::{self, PrivateIdentity, PublicIdentity};
@@ -274,7 +273,12 @@ impl RouterState {
     }
 }
 
-pub async fn run_router(settings: &Config) -> Result<()> {
+pub struct RouterConfig {
+    pub websockets_listen: Vec<String>,
+    pub websockets_connect: Vec<String>,
+}
+
+pub async fn run_router(config: &RouterConfig) -> Result<()> {
     let (connection_tx, mut connection_rx) =
         mpsc::channel::<(UntaggedConnection, Option<PublicIdentity>)>(64);
     let (router_msg_tx, mut router_msg_rx) = mpsc::channel::<TaggedRawMessage>(64);
@@ -287,14 +291,32 @@ pub async fn run_router(settings: &Config) -> Result<()> {
 
     let mut state = RouterState::new(this_id.clone());
 
-    if let Ok(addr) = settings.get_string("websockets_listen") {
-        println!("listening on {addr:?}");
-    }
-    if let Ok(addr) = settings.get_string("websockets_connect") {
-        println!("connecting to {addr:?}");
-        let connection_sender = connection_tx.clone();
-        tokio::spawn(connect_websockets(connection_sender, id.clone(), addr));
-    }
+    let _listen_handles = config
+        .websockets_listen
+        .iter()
+        .map(|addr| {
+            println!("ws listening on {addr:?}");
+            let connection_sender = connection_tx.clone();
+            tokio::spawn(listen_websockets(
+                connection_sender,
+                id.clone(),
+                addr.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let _connect_handles = config
+        .websockets_connect
+        .iter()
+        .map(|addr| {
+            println!("ws connecting to {addr:?}");
+            let connection_sender = connection_tx.clone();
+            tokio::spawn(connect_websockets(
+                connection_sender,
+                id.clone(),
+                addr.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
 
     let (tx, mut flood_rx) = mpsc::channel(1);
 

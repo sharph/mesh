@@ -1,5 +1,5 @@
 use anyhow::Result;
-use config::Config;
+use clap_conf::prelude::*;
 
 mod crypto;
 mod proto;
@@ -8,11 +8,37 @@ mod websockets;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Hello, world!");
-    let settings = Config::builder()
-        .add_source(config::Environment::with_prefix("MESH"))
-        .build()
-        .unwrap();
-    router::run_router(&settings).await?;
+    let matches = clap_app!(mesh =>
+        (author: "Sharp Hall <sharp@sharphall.org>")
+        (version: crate_version!())
+        (@arg config: -c --config +takes_value "Sets a custom config file")
+        (@arg listen_addresses: -l --ws_listen +takes_value "A comma separated list of bind addresses")
+        (@arg connect_addresses: -C --ws_connect +takes_value "A comma separated list of addresses to connect to")
+    )
+    .get_matches();
+    let cfg = with_toml_env(&matches, ["config.toml"]);
+    router::run_router(&router::RouterConfig {
+        websockets_connect: cfg
+            .grab()
+            .conf("connect.addresses")
+            .arg("connect_addresses")
+            .env("MESH_WS_CONNECT_ADDRESSES")
+            .def("")
+            .split(",")
+            .filter(|s| s != &"")
+            .map(|s| s.to_string())
+            .collect(),
+        websockets_listen: cfg
+            .grab()
+            .conf("listen.addresses")
+            .arg("listen_addresses")
+            .env("MESH_WS_LISTEN_ADDRESSES")
+            .def("")
+            .split(",")
+            .filter(|s| s != &"")
+            .map(|s| s.to_string())
+            .collect(),
+    })
+    .await?;
     Ok(())
 }
