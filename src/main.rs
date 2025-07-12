@@ -3,6 +3,7 @@ use config::Config;
 
 mod crypto;
 mod node;
+mod proto;
 mod websockets;
 
 #[tokio::main]

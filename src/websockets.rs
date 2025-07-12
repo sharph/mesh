@@ -10,7 +10,8 @@ use tokio::task::JoinHandle;
 use tokio_websockets::{ClientBuilder, ServerBuilder, WebSocketStream};
 
 use crate::crypto::{PrivateIdentity, PublicIdentity};
-use crate::node::{RawMessage, UntaggedConnection};
+use crate::node::UntaggedConnection;
+use crate::proto::RawMessage;
 
 #[derive(Encode, Decode, Debug)]
 struct HelloMessage {
