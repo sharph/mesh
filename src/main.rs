@@ -4,6 +4,8 @@ use clap_conf::prelude::*;
 mod crypto;
 mod proto;
 mod router;
+mod tun;
+mod unicast;
 mod websockets;
 
 #[tokio::main]
@@ -14,6 +16,7 @@ async fn main() -> Result<()> {
         (@arg config: -c --config +takes_value "Sets a custom config file")
         (@arg listen_addresses: -l --ws_listen +takes_value "A comma separated list of bind addresses")
         (@arg connect_addresses: -C --ws_connect +takes_value "A comma separated list of addresses to connect to")
+        (@arg tun: --tun +takes_value "Run tun interface")
     )
     .get_matches();
     let cfg = with_toml_env(&matches, ["config.toml"]);
@@ -38,6 +41,7 @@ async fn main() -> Result<()> {
             .filter(|s| s != &"")
             .map(|s| s.to_string())
             .collect(),
+        tun: cfg.grab().arg("tun").def("true") == "true",
     })
     .await?;
     Ok(())

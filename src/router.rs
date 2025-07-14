@@ -1,13 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
-use crate::crypto::{self, PrivateIdentity, PublicIdentity};
+use crate::crypto::{self, PrivateIdentity, PublicIdentity, ShortId};
 use crate::proto::{
     ConnectionId, DEFAULT_TTL, MeshMessage, MessagePayload, RawMessage, Route, TaggedRawMessage,
+    UnicastDestination, UnicastMessage, UnicastMessagePayload,
 };
+use crate::tun;
+use crate::unicast::{UnicastConnection, run_unicast_connection};
 use crate::websockets::{connect_websockets, listen_websockets};
 
 const FLOOD_DB_SIZE: usize = 1024 * 8;
@@ -113,17 +116,44 @@ impl FloodDB {
 struct RouteDBEntry {
     seen: BTreeMap<Route, Instant>,
     instants: BTreeMap<Instant, Route>,
+    unicast_connection: Option<UnicastConnection>,
 }
 
 #[derive(Default)]
-struct RouteDB(BTreeMap<PublicIdentity, RouteDBEntry>);
+struct RouteDB {
+    routes: BTreeMap<PublicIdentity, RouteDBEntry>,
+    short_id_lookup: HashMap<ShortId, PublicIdentity>,
+}
 
 impl RouteDB {
     fn is_route_in_db(&self, id: &PublicIdentity, route: &Route) -> bool {
-        if let Some(db_entry) = self.0.get(id) {
+        if let Some(db_entry) = self.routes.get(id) {
             db_entry.seen.contains_key(route)
         } else {
             false
+        }
+    }
+
+    fn get_route(&mut self, id: &PublicIdentity) -> Option<&mut RouteDBEntry> {
+        self.routes.get_mut(id)
+    }
+
+    fn get_route_for_unicast_destination(
+        &mut self,
+        dest: &UnicastDestination,
+    ) -> Option<(PublicIdentity, &mut RouteDBEntry)> {
+        match dest {
+            UnicastDestination::ShortId(short_id) => {
+                if let Some(id) = self.short_id_lookup.get(short_id) {
+                    let id = id.clone();
+                    self.get_route(&id).map(|r| (id, r))
+                } else {
+                    None
+                }
+            }
+            UnicastDestination::PublicIdentity(pub_id) => {
+                self.get_route(pub_id).map(|r| (pub_id.clone(), r))
+            }
         }
     }
 
@@ -132,7 +162,8 @@ impl RouteDB {
     /// Adds route to db and returns true if route is shortest
     fn observe_route(&mut self, id: &PublicIdentity, route: &Route) -> bool {
         let instant = Instant::now();
-        if let Some(rec) = self.0.get_mut(id) {
+        self.short_id_lookup.insert(id.short_id(), id.clone());
+        if let Some(rec) = self.routes.get_mut(id) {
             if let Some(old_instant) = rec.seen.remove(route) {
                 rec.instants.remove(&old_instant).unwrap();
             }
@@ -143,7 +174,7 @@ impl RouteDB {
             let mut rdb = RouteDBEntry::default();
             rdb.seen.insert(route.clone(), instant);
             rdb.instants.insert(instant, route.clone());
-            self.0.insert(id.clone(), rdb);
+            self.routes.insert(id.clone(), rdb);
             true
         }
     }
@@ -154,15 +185,26 @@ struct RouterState {
     connections: Vec<Connection>,
     route_db: RouteDB,
     flood_db: FloodDB,
+    message_sending_tx: mpsc::Sender<MeshMessage>,
+    unicast_sending_tx: mpsc::Sender<UnicastMessage>,
+    unicast_receiving_tx: mpsc::Sender<UnicastMessage>,
 }
 
 impl RouterState {
-    fn new(id: PrivateIdentity) -> Self {
+    fn new(
+        id: PrivateIdentity,
+        message_sending_tx: mpsc::Sender<MeshMessage>,
+        unicast_sending_tx: mpsc::Sender<UnicastMessage>,
+        unicast_receiving_tx: mpsc::Sender<UnicastMessage>,
+    ) -> Self {
         Self {
             id,
             connections: Vec::new(),
             route_db: RouteDB::default(),
             flood_db: FloodDB::default(),
+            message_sending_tx,
+            unicast_sending_tx,
+            unicast_receiving_tx,
         }
     }
 
@@ -211,6 +253,16 @@ impl RouterState {
         Ok(())
     }
 
+    fn send_to(&mut self, msg: MeshMessage, to: ConnectionId) -> Result<()> {
+        println!("{msg:?} {to:?}");
+        let raw_message = RawMessage::try_from(msg)?;
+        let Some(connection) = self.connections.get_mut(to.0 as usize) else {
+            bail!("invalid connection")
+        };
+        connection.send_message(raw_message.clone())?;
+        Ok(())
+    }
+
     fn handle_flood(&mut self, msg: &MeshMessage, from: ConnectionId) -> Result<()> {
         let mut msg = msg.clone();
         if !msg.signature_valid()? {
@@ -219,15 +271,14 @@ impl RouterState {
         // TODO: check flood time
         // TODO: enforce a local ttl
         if let Some(from_id) = &msg.from {
-            println!("got flood from {}", from_id.base64());
+            msg.trace.push_front(from);
             let in_flood_db = self
                 .flood_db
                 .update(FloodDBEntry::new(from_id.clone(), msg.payload.clone()));
-            let best_in_route_db = self.route_db.observe_route(from_id, &msg.route);
-            if (in_flood_db && best_in_route_db) || (msg.ttl as usize) < msg.route.len() {
+            let best_in_route_db = self.route_db.observe_route(from_id, &msg.trace);
+            if (in_flood_db && best_in_route_db) || (msg.ttl as usize) < msg.trace.len() {
                 return Ok(());
             }
-            msg.route.push_front(from);
             self.send_to_all(msg.clone(), Some(from))?;
         }
         Ok(())
@@ -238,6 +289,7 @@ impl RouterState {
             from: None,
             to: None,
             ttl: 0,
+            trace: Route::default(),
             route: Route::default(),
             payload: MessagePayload::Noop,
             signature: None,
@@ -248,16 +300,27 @@ impl RouterState {
         }
     }
 
+    fn send_message(&mut self, mut msg: MeshMessage) -> Result<()> {
+        match msg.payload {
+            MessagePayload::Unicast(_) => {
+                let dest = msg.route.pop_front().ok_or(anyhow!("no route!"))?;
+                self.send_to(msg, dest)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn send_flood(&mut self) -> Result<()> {
         let mut msg = MeshMessage {
             from: Some(self.id.public_id.clone()),
             to: None,
             ttl: DEFAULT_TTL,
+            trace: Route::default(),
             route: Route::default(),
             payload: MessagePayload::Flood(std::time::SystemTime::now()),
             signature: None,
         };
-        println!("sending flood from {}", msg.from.clone().unwrap().base64());
         msg.sign(&self.id)?;
         self.send_to_all(msg, None)?;
         Ok(())
@@ -266,9 +329,49 @@ impl RouterState {
     fn handle_message(&mut self, msg: TaggedRawMessage) -> Result<()> {
         let conn = msg.connection_id;
         let msg = MeshMessage::try_from(msg.msg)?;
-        if let MessagePayload::Flood(_) = msg.payload {
-            self.handle_flood(&msg, conn)?
+        match msg.payload {
+            MessagePayload::Flood(_) => self.handle_flood(&msg, conn)?,
+            MessagePayload::Unicast(_) => self.handle_unicast_for_us(msg)?,
+            _ => {}
         }
+        Ok(())
+    }
+
+    fn get_unicast_connection(
+        &mut self,
+        dest: &UnicastDestination,
+    ) -> Result<&mut UnicastConnection> {
+        let Some((id, route_db_entry)) = self.route_db.get_route_for_unicast_destination(dest)
+        else {
+            bail!("no route")
+        };
+        if route_db_entry.unicast_connection.is_none() {
+            route_db_entry.unicast_connection = Some(run_unicast_connection(
+                self.id.public_id.clone(),
+                id,
+                self.message_sending_tx.clone(),
+                self.unicast_receiving_tx.clone(),
+            ));
+            route_db_entry
+                .unicast_connection
+                .as_mut()
+                .unwrap()
+                .add_route(route_db_entry.seen.first_key_value().unwrap().0.clone())?;
+        }
+        Ok(route_db_entry.unicast_connection.as_mut().unwrap())
+    }
+
+    fn handle_unicast_for_us(&mut self, msg: MeshMessage) -> Result<()> {
+        self.get_unicast_connection(&UnicastDestination::PublicIdentity(
+            msg.from.as_ref().ok_or(anyhow!("no from field"))?.clone(),
+        ))?
+        .receive_mesh_message(msg)?;
+        Ok(())
+    }
+
+    fn send_unicast_message(&mut self, msg: UnicastMessage) -> Result<()> {
+        self.get_unicast_connection(&msg.to)?.send_unicast(msg)?;
+        // TODO: detect closed connections
         Ok(())
     }
 }
@@ -276,12 +379,16 @@ impl RouterState {
 pub struct RouterConfig {
     pub websockets_listen: Vec<String>,
     pub websockets_connect: Vec<String>,
+    pub tun: bool,
 }
 
 pub async fn run_router(config: &RouterConfig) -> Result<()> {
     let (connection_tx, mut connection_rx) =
         mpsc::channel::<(UntaggedConnection, Option<PublicIdentity>)>(64);
     let (router_msg_tx, mut router_msg_rx) = mpsc::channel::<TaggedRawMessage>(64);
+    let (msg_sending_tx, mut msg_sending_rx) = mpsc::channel::<MeshMessage>(64);
+    let (unicast_sending_tx, mut unicast_sending_rx) = mpsc::channel::<UnicastMessage>(64);
+    let (unicast_receiving_tx, mut unicast_receiving_rx) = mpsc::channel::<UnicastMessage>(64);
 
     let this_id = crypto::PrivateIdentity::new();
     let id = this_id.clone();
@@ -289,7 +396,12 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
     println!("public id: {}", id.public_id);
     println!("private key: {}", id.base64());
 
-    let mut state = RouterState::new(this_id.clone());
+    let mut state = RouterState::new(
+        this_id.clone(),
+        msg_sending_tx,
+        unicast_sending_tx.clone(),
+        unicast_receiving_tx,
+    );
 
     let _listen_handles = config
         .websockets_listen
@@ -318,6 +430,14 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
         })
         .collect::<Vec<_>>();
 
+    println!("{}", id.public_id.to_ipv6_address());
+    let mut tun_tx = if config.tun {
+        let id_for_tun = id.public_id.clone();
+        Some(tun::run_tun(&id_for_tun, unicast_sending_tx.clone())?)
+    } else {
+        None
+    };
+
     let (tx, mut flood_rx) = mpsc::channel(1);
 
     tokio::spawn(async move {
@@ -333,7 +453,25 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
                 state.add_connection(conn, id, router_msg_tx.clone())?;
             }
             Some(val) = router_msg_rx.recv() => {
+                // a message comes in from a remote connection
                 let _ = state.handle_message(val);
+            }
+            Some(msg) = msg_sending_rx.recv() => {
+                // some local service wants to send a MeshMessage
+                let _ = state.send_message(msg);
+            }
+            Some(msg) = unicast_sending_rx.recv() => {
+                // some local service wants to send a message.
+                // this codepath turns it into a MeshMessage and sends it
+                // out remotely
+                let _ = state.send_unicast_message(msg);
+            }
+            Some(msg) = unicast_receiving_rx.recv() => {
+                if let Some(ttx) = tun_tx.as_mut() {
+                    let _ = ttx.try_send(msg);
+                } else {
+                    println!("{msg:?}");
+                }
             }
             _ = flood_rx.recv() => {
                 let _ = state.send_flood();

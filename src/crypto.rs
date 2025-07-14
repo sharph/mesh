@@ -1,5 +1,3 @@
-use ed25519_dalek;
-
 use anyhow::Result;
 use base64::prelude::*;
 use bincode::{Decode, Encode};
@@ -8,16 +6,22 @@ use ed25519_dalek::ed25519::SignatureBytes;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
-use std::fmt::{self, write};
 
 pub type NodeId = [u8; 32];
+pub type ShortId = [u8; 12];
 
 #[derive(Clone, Encode, Decode, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicIdentity {
-    public_key: NodeId,
+    pub public_key: NodeId,
 }
 
-impl PublicIdentity {}
+impl PublicIdentity {
+    pub fn short_id(&self) -> ShortId {
+        self.public_key[0..12]
+            .try_into()
+            .expect("couldn't convert NodeId into ShortId")
+    }
+}
 
 impl std::fmt::Display for PublicIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

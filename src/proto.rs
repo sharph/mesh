@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use bincode::{Decode, Encode};
 use ed25519_dalek::ed25519::SignatureBytes;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{PrivateIdentity, PublicIdentity};
+use crate::crypto::{PrivateIdentity, PublicIdentity, ShortId};
 
 pub const DEFAULT_TTL: u8 = 16;
 
@@ -21,11 +21,58 @@ pub struct TaggedRawMessage {
 }
 
 #[derive(Eq, PartialEq, Encode, Decode, Clone, Hash, Debug)]
+pub enum UnicastMessagePayload {
+    Payload(u16, Vec<u8>),
+}
+
+#[derive(Debug)]
+pub enum UnicastDestination {
+    ShortId(ShortId),
+    PublicIdentity(PublicIdentity),
+}
+
+#[derive(Debug)]
+pub struct UnicastMessage {
+    pub to: UnicastDestination,
+    pub from: PublicIdentity,
+    pub payload: UnicastMessagePayload,
+}
+
+impl UnicastMessage {
+    pub fn into_mesh_message(self, to: PublicIdentity, route: Route) -> MeshMessage {
+        MeshMessage {
+            from: Some(self.from),
+            to: Some(to),
+            ttl: DEFAULT_TTL,
+            trace: Route::default(),
+            route,
+            payload: MessagePayload::Unicast(self.payload),
+            signature: None,
+        }
+    }
+
+    pub fn from_mesh_message(msg: MeshMessage) -> Result<UnicastMessage> {
+        let MessagePayload::Unicast(payload) = msg.payload else {
+            bail!("MeshMessage didn't have unicast payload")
+        };
+        Ok(UnicastMessage {
+            from: msg
+                .from
+                .ok_or_else(|| anyhow!("no 'from' in MeshMessage"))?,
+            to: UnicastDestination::PublicIdentity(
+                msg.to.ok_or_else(|| anyhow!("no 'to' in MeshMessage"))?,
+            ),
+            payload,
+        })
+    }
+}
+
+#[derive(Eq, PartialEq, Encode, Decode, Clone, Hash, Debug)]
 pub enum MessagePayload {
     Noop,
     Flood(std::time::SystemTime),
     Ping,
-    Unicast(Vec<u8>),
+    Unicast(UnicastMessagePayload),
     Disconnect,
 }
 
@@ -63,6 +110,7 @@ pub struct MeshMessage {
     pub from: Option<PublicIdentity>,
     pub to: Option<PublicIdentity>,
     pub ttl: u8,
+    pub trace: Route,
     pub route: Route,
     pub payload: MessagePayload,
     pub signature: Option<SignatureBytes>,
@@ -74,6 +122,7 @@ impl MeshMessage {
             from: Some(id.public_id.clone()),
             to: None,
             ttl: DEFAULT_TTL,
+            trace: Route::default(),
             route: Route::default(),
             payload: MessagePayload::Flood(std::time::SystemTime::now()),
             signature: None,
@@ -102,7 +151,7 @@ impl MeshMessage {
             self.payload.clone(),
             bincode::config::standard(),
         )?;
-        Ok(from.verify(serialized_payload, &signature)?)
+        Ok(from.verify(serialized_payload, signature)?)
     }
 }
 

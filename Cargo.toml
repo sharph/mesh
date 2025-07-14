@@ -8,11 +8,14 @@ anyhow = "1.0.98"
 async-trait = "0.1.88"
 base64 = "0.22.1"
 bincode = { version = "2.0.1", features = ["derive", "serde"] }
+bytes = "1.10.1"
 clap_conf = "0.2.0"
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 futures-util = { version = "0.3.31", features = ["sink"] }
 http = "1.3.1"
+pnet = "0.35.0"
 rand = "0.8.0"
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.45.0", features = ["full", "net", "rt", "sync"] }
 tokio-websockets = { version = "0.11.4", features = ["client", "native-tls", "openssl", "rand", "server"] }
+tun-rs = { version = "2.4.3", features = ["async_framed", "async_tokio"] }
