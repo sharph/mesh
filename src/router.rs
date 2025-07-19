@@ -328,10 +328,17 @@ impl RouterState {
 
     fn handle_message(&mut self, msg: TaggedRawMessage) -> Result<()> {
         let conn = msg.connection_id;
-        let msg = MeshMessage::try_from(msg.msg)?;
+        let mut msg = MeshMessage::try_from(msg.msg)?;
         match msg.payload {
             MessagePayload::Flood(_) => self.handle_flood(&msg, conn)?,
-            MessagePayload::Unicast(_) => self.handle_unicast_for_us(msg)?,
+            MessagePayload::Unicast(_) => {
+                if msg.to.as_ref() == Some(&self.id.public_id) || msg.route.is_empty() {
+                    self.handle_unicast_for_us(msg)?
+                } else if let Some(next_hop) = msg.route.pop_front() {
+                    msg.trace.push_front(conn);
+                    self.send_to(msg, next_hop)?;
+                }
+            }
             _ => {}
         }
         Ok(())

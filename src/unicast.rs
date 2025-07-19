@@ -166,16 +166,19 @@ pub fn run_unicast_connection(
     let mut crypto_state = CryptoState::default();
     tokio::spawn(async move {
         loop {
-            let ready = routes.has_route() && crypto_state.ready();
+            let has_route = routes.has_route();
+            let ready = has_route && crypto_state.ready();
             let option = tokio::select! {
                 msg = unicast_sending_rx.recv(), if ready => {
+                    // process messages only when encrypted path is setup
                     if let Some(msg) = msg {
                         UnicastOption::UnicastMessage(msg)
                     } else {
                         UnicastOption::EndConnection
                     }
                 }
-                msg = message_receiving_rx.recv() => {
+                msg = message_receiving_rx.recv(), if has_route => {
+                    // don't start processing kex messages until we have a route
                     if let Some(msg) = msg {
                         UnicastOption::MeshMessage(msg)
                     } else {

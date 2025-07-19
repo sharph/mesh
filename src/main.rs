@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
             .filter(|s| s != &"")
             .map(|s| s.to_string())
             .collect(),
-        tun: cfg.grab().arg("tun").def("true") == "true",
+        tun: cfg.grab().arg("tun").def("false") == "true",
     })
     .await?;
     Ok(())
