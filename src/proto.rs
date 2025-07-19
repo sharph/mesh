@@ -5,7 +5,10 @@ use bincode::{Decode, Encode};
 use ed25519_dalek::ed25519::SignatureBytes;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{PrivateIdentity, PublicIdentity, ShortId};
+use crate::crypto::{
+    EncryptedMessage, EncryptionSession, KeyExchangeMessage, PrivateIdentity, PublicIdentity,
+    ShortId,
+};
 
 pub const DEFAULT_TTL: u8 = 16;
 
@@ -22,8 +25,13 @@ pub struct TaggedRawMessage {
 
 #[derive(Eq, PartialEq, Encode, Decode, Clone, Hash, Debug)]
 pub enum UnicastMessagePayload {
-    Payload(u16, Vec<u8>),
+    KeyExchange1(KeyExchangeMessage),
+    KeyExchange2(KeyExchangeMessage),
+    EncryptedPayload(EncryptedMessage),
 }
+
+#[derive(Eq, PartialEq, Encode, Decode, Clone, Hash, Debug)]
+pub struct UnicastPayload(pub u16, pub Vec<u8>);
 
 #[derive(Debug)]
 pub enum UnicastDestination {
@@ -35,32 +43,55 @@ pub enum UnicastDestination {
 pub struct UnicastMessage {
     pub to: UnicastDestination,
     pub from: PublicIdentity,
-    pub payload: UnicastMessagePayload,
+    pub payload: UnicastPayload,
 }
 
 impl UnicastMessage {
-    pub fn into_mesh_message(self, to: PublicIdentity, route: Route) -> MeshMessage {
-        MeshMessage {
-            from: Some(self.from),
+    pub fn into_mesh_message(
+        &self,
+        to: PublicIdentity,
+        route: Route,
+        session: &mut EncryptionSession,
+    ) -> Result<MeshMessage> {
+        let payload = bincode::encode_to_vec(self.payload.clone(), bincode::config::standard())?;
+        Ok(MeshMessage {
+            from: Some(self.from.clone()),
             to: Some(to),
             ttl: DEFAULT_TTL,
             trace: Route::default(),
             route,
-            payload: MessagePayload::Unicast(self.payload),
+            payload: MessagePayload::Unicast(UnicastMessagePayload::EncryptedPayload(
+                session.encrypt(&payload)?,
+            )),
             signature: None,
-        }
+        })
     }
 
-    pub fn from_mesh_message(msg: MeshMessage) -> Result<UnicastMessage> {
-        let MessagePayload::Unicast(payload) = msg.payload else {
+    pub fn from_mesh_message(
+        msg: &MeshMessage,
+        session: &EncryptionSession,
+    ) -> Result<UnicastMessage> {
+        let MessagePayload::Unicast(UnicastMessagePayload::EncryptedPayload(payload)) =
+            &msg.payload
+        else {
             bail!("MeshMessage didn't have unicast payload")
         };
+        let payload = bincode::decode_from_slice::<UnicastPayload, _>(
+            session.decrypt(payload)?.as_slice(),
+            bincode::config::standard(),
+        )?
+        .0;
         Ok(UnicastMessage {
             from: msg
                 .from
-                .ok_or_else(|| anyhow!("no 'from' in MeshMessage"))?,
+                .as_ref()
+                .ok_or_else(|| anyhow!("no 'from' in MeshMessage"))?
+                .clone(),
             to: UnicastDestination::PublicIdentity(
-                msg.to.ok_or_else(|| anyhow!("no 'to' in MeshMessage"))?,
+                msg.to
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("no 'to' in MeshMessage"))?
+                    .clone(),
             ),
             payload,
         })
@@ -117,6 +148,34 @@ pub struct MeshMessage {
 }
 
 impl MeshMessage {
+    pub fn unicast(
+        from: PublicIdentity,
+        to: PublicIdentity,
+        route: Route,
+        payload: UnicastMessagePayload,
+    ) -> Self {
+        Self {
+            from: Some(from),
+            to: Some(to),
+            trace: Route::default(),
+            ttl: DEFAULT_TTL,
+            route,
+            payload: MessagePayload::Unicast(payload),
+            signature: None,
+        }
+    }
+
+    pub fn unicast_sign(
+        from: &PrivateIdentity,
+        to: PublicIdentity,
+        route: Route,
+        payload: UnicastMessagePayload,
+    ) -> Result<Self> {
+        let mut msg = Self::unicast(from.public_id.clone(), to, route, payload);
+        msg.sign(from)?;
+        Ok(msg)
+    }
+
     fn flood(id: &PrivateIdentity) -> Result<MeshMessage> {
         let mut msg = MeshMessage {
             from: Some(id.public_id.clone()),

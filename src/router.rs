@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use crate::crypto::{self, PrivateIdentity, PublicIdentity, ShortId};
 use crate::proto::{
     ConnectionId, DEFAULT_TTL, MeshMessage, MessagePayload, RawMessage, Route, TaggedRawMessage,
-    UnicastDestination, UnicastMessage, UnicastMessagePayload,
+    UnicastDestination, UnicastMessage,
 };
 use crate::tun;
 use crate::unicast::{UnicastConnection, run_unicast_connection};
@@ -347,7 +347,7 @@ impl RouterState {
         };
         if route_db_entry.unicast_connection.is_none() {
             route_db_entry.unicast_connection = Some(run_unicast_connection(
-                self.id.public_id.clone(),
+                self.id.clone(),
                 id,
                 self.message_sending_tx.clone(),
                 self.unicast_receiving_tx.clone(),

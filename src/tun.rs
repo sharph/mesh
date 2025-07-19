@@ -96,7 +96,7 @@ fn handle_packet(
     tx.try_send(UnicastMessage {
         to: proto::UnicastDestination::ShortId(tun_payload.to_addr.octets()[4..16].try_into()?),
         from: our_id.clone(),
-        payload: proto::UnicastMessagePayload::Payload(1, tun_payload.to_mesh_message()),
+        payload: proto::UnicastPayload(1, tun_payload.to_mesh_message()),
     })
     .unwrap();
     Ok(())
@@ -110,9 +110,7 @@ async fn handle_from_mesh(
     let proto::UnicastDestination::PublicIdentity(to) = &msg.to else {
         bail!("we don't know how to handle a message with a short id")
     };
-    let proto::UnicastMessagePayload::Payload(_, payload) = &msg.payload else {
-        bail!("got a payload that wasn't unicast");
-    };
+    let proto::UnicastPayload(_, payload) = &msg.payload;
     let tun_payload = TunPayload::new(&msg.from, &to, &payload)?;
     let bytes = BytesMut::try_from(tun_payload.to_ipv6_packet().as_slice())?;
     device.send(bytes).await?;
