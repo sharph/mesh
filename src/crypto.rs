@@ -1,9 +1,8 @@
 use aes_gcm::{
-    Aes256Gcm, Key, Nonce,
+    Aes256Gcm, Key,
     aead::{Aead, AeadCore, KeyInit},
-    aes::Aes256,
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use base64::prelude::*;
 use bincode::{Decode, Encode};
 use ed25519_dalek::Signature;
