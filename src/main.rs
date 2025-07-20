@@ -20,6 +20,7 @@ async fn main() -> Result<()> {
     )
     .get_matches();
     let cfg = with_toml_env(&matches, ["config.toml"]);
+    colog::init();
     router::run_router(&router::RouterConfig {
         websockets_connect: cfg
             .grab()

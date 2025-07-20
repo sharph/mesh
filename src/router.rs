@@ -39,10 +39,10 @@ impl Connection {
             let tx = tx.clone();
             if !tx.is_closed() {
                 if tx.try_send(message).is_err() {
-                    println!("buffer full");
+                    log::error!("connection buffer full");
                 }
             } else {
-                println!("connection closed");
+                log::info!("connection closed");
                 self.tx = None;
             }
         }
@@ -219,9 +219,9 @@ impl RouterState {
         let TaggedConnection(tx, mut rx) = tag_connection(connection, conn_id);
         if let Some(some_id) = &id {
             if inbound {
-                println!("adding new connection from {}", some_id.base64());
+                log::info!("adding new connection from {}", some_id.base64());
             } else {
-                println!("adding new connection to {}", some_id.base64());
+                log::info!("adding new connection to {}", some_id.base64());
             }
         }
         self.connections.push(Connection {
@@ -254,7 +254,7 @@ impl RouterState {
     }
 
     fn send_to(&mut self, msg: MeshMessage, to: ConnectionId) -> Result<()> {
-        println!("{msg:?} {to:?}");
+        log::debug!("{msg:?} {to:?}");
         let raw_message = RawMessage::try_from(msg)?;
         let Some(connection) = self.connections.get_mut(to.0 as usize) else {
             bail!("invalid connection")
@@ -400,8 +400,8 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
     let this_id = crypto::PrivateIdentity::new();
     let id = this_id.clone();
 
-    println!("public id: {}", id.public_id);
-    println!("private key: {}", id.base64());
+    log::info!("public id: {}", id.public_id);
+    log::info!("private key: {}", id.base64());
 
     let mut state = RouterState::new(
         this_id.clone(),
@@ -414,7 +414,7 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
         .websockets_listen
         .iter()
         .map(|addr| {
-            println!("ws listening on {addr:?}");
+            log::info!("ws listening on {addr:?}");
             let connection_sender = connection_tx.clone();
             tokio::spawn(listen_websockets(
                 connection_sender,
@@ -427,7 +427,7 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
         .websockets_connect
         .iter()
         .map(|addr| {
-            println!("ws connecting to {addr:?}");
+            log::info!("ws connecting to {addr:?}");
             let connection_sender = connection_tx.clone();
             tokio::spawn(connect_websockets(
                 connection_sender,
@@ -437,7 +437,7 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
         })
         .collect::<Vec<_>>();
 
-    println!("{}", id.public_id.to_ipv6_address());
+    log::info!("your ipv6: {}", id.public_id.to_ipv6_address());
     let mut tun_tx = if config.tun {
         let id_for_tun = id.public_id.clone();
         Some(tun::run_tun(&id_for_tun, unicast_sending_tx.clone())?)
@@ -477,7 +477,7 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
                 if let Some(ttx) = tun_tx.as_mut() {
                     let _ = ttx.try_send(msg);
                 } else {
-                    println!("{msg:?}");
+                    log::debug!("unhandled unicast: {msg:?}");
                 }
             }
             _ = flood_rx.recv() => {

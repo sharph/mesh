@@ -26,14 +26,15 @@ impl Routes {
                 } else {
                     self.0 = Some(route.clone());
                 }
+                log::debug!("unicast add route: {:?}", self.0);
             }
             RouteManagementMessage::Delete(route) => {
                 if Some(route) == self.0.as_ref() {
                     self.0 = None
                 }
+                log::debug!("unicast del route: {:?}", self.0);
             }
         }
-        println!("route: {:?}", self.0);
     }
 
     fn has_route(&self) -> bool {
@@ -74,7 +75,6 @@ impl UnicastConnection {
     }
 
     pub fn add_route(&self, route: Route) -> Result<()> {
-        println!("fn add_route");
         Ok(self
             .route_management_tx
             .try_send(RouteManagementMessage::Add(route))?)
@@ -162,7 +162,7 @@ pub fn run_unicast_connection(
     let (message_receiving_tx, mut message_receiving_rx) = channel(64);
     let (unicast_sending_tx, mut unicast_sending_rx) = channel(64);
     let mut routes = Routes::default();
-    println!("new unicast connection");
+    log::info!("new unicast connection");
     let mut crypto_state = CryptoState::default();
     tokio::spawn(async move {
         loop {

@@ -123,8 +123,7 @@ where
         return Err(anyhow!("invalid signature"));
     }
     if challenge.message.nonce != response.message.nonce {
-        println!("{challenge:?}");
-        println!("{challenge:?}");
+        log::error!("challenge nonce doesn't match {challenge:?}");
         return Err(anyhow!("nonce doesn't match"));
     }
     Ok(response.message.id)
@@ -134,11 +133,11 @@ async fn handshake<S>(wss: &mut WebSocketStream<S>, id: &PrivateIdentity) -> Res
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    println!("sending challenge");
+    log::debug!("sending challenge");
     let challenge = handshake_challenge(wss, id).await?;
-    println!("responding to challenge");
+    log::debug!("responding to challenge");
     let pub_id_2 = handshake_response(wss, id).await?;
-    println!("verifying");
+    log::debug!("verifying");
     let pub_id = handshake_verify_response(wss, &challenge).await?;
     if pub_id == pub_id_2 {
         Ok(pub_id)
@@ -180,7 +179,7 @@ where
                 }
             }
         }
-        println!("disconnected");
+        log::info!("websockets disconnected");
     });
     Ok((UntaggedConnection(out_tx, in_rx, inbound), Some(their_id)))
 }
@@ -201,7 +200,7 @@ where
         .0;
     let connection = run_websockets_connection(ws_stream, id, false).await?;
     let _ = connection_sender.send(connection).await;
-    println!("handshake successful");
+    log::debug!("handshake successful");
     Ok(())
 }
 
@@ -214,25 +213,25 @@ where
     A: ToSocketAddrs,
 {
     let listener = TcpListener::bind(addr).await?;
-    println!("listening");
+    log::info!("websockets listening");
     let listening = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            println!("new connection");
+            log::info!("new websockets connection");
             let tx = connection_sender.clone();
             let conn_id = id.clone();
             tokio::spawn(async move {
                 let Ok((_, ws_stream)) = ServerBuilder::new().accept(stream).await else {
-                    println!("websockets failed");
+                    log::error!("websockets failed");
                     return;
                 };
                 match run_websockets_connection(ws_stream, conn_id, true).await {
                     Ok(connection) => {
-                        println!("handshake successful");
+                        log::info!("websockets handshake successful");
                         let _ = tx.send(connection).await;
                     }
                     Err(err) => {
-                        println!("handshake not successful");
-                        println!("{err:?}");
+                        log::error!("handshake not successful");
+                        log::error!("{err:?}");
                     }
                 }
             });

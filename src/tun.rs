@@ -1,16 +1,15 @@
-use crate::proto::{self, UnicastMessage};
-use crate::tun;
 use anyhow::{Result, bail};
 use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
+use log::error;
 use tokio::sync::mpsc::{Sender, channel};
+use tun_rs::DeviceBuilder;
 use tun_rs::async_framed::{BytesCodec, DeviceFramed};
-use tun_rs::{AsyncDevice, DeviceBuilder};
 
-use pnet::packet::{self, Packet, ipv6};
 use std::net::Ipv6Addr;
 
 use crate::crypto::{PublicIdentity, ShortId};
+use crate::proto::{self, UnicastMessage};
 
 impl PublicIdentity {
     pub fn to_ipv6_address(&self) -> Ipv6Addr {
@@ -138,7 +137,7 @@ pub fn run_tun(
                     if let Ok(packet) = packet {
                         let _ = handle_packet(&id, &packet.to_vec(), &mut unicast_out);
                     } else {
-                        println!("couldn't get packet");
+                        error!("couldn't get packet from tun");
                     }
                 }
                 msg = unicast_in.recv() => {

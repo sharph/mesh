@@ -11,9 +11,11 @@ base64 = "0.22.1"
 bincode = { version = "2.0.1", features = ["derive", "serde"] }
 bytes = "1.10.1"
 clap_conf = "0.2.0"
+colog = "1.3.0"
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 futures-util = { version = "0.3.31", features = ["sink"] }
 http = "1.3.1"
+log = "0.4.27"
 pnet = "0.35.0"
 rand = "0.8.0"
 serde = { version = "1.0.219", features = ["derive"] }
