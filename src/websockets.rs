@@ -163,13 +163,15 @@ where
             let from_ws = wss.next();
             let from_router = out_rx.recv();
             tokio::select! {
-                Some(Ok(msg)) = from_ws => {
+                msg = from_ws => {
+                    let Some(Ok(msg)) = msg else { break; };
                     if (msg.is_binary() || msg.is_text())
                             && in_tx.send(RawMessage(msg.into_payload().to_vec())).await.is_err() {
                         break;
                     }
                 }
-                Some(msg) = from_router => {
+                msg = from_router => {
+                    let Some(msg) = msg else { break; };
                     if wss.send(tokio_websockets::Message::binary(msg.0)).await.is_err() {
                         break;
                     }
