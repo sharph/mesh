@@ -332,10 +332,10 @@ impl RouterState {
         match msg.payload {
             MessagePayload::Flood(_) => self.handle_flood(&msg, conn)?,
             MessagePayload::Unicast(_) => {
+                msg.trace.push_front(conn);
                 if msg.to.as_ref() == Some(&self.id.public_id) || msg.route.is_empty() {
                     self.handle_unicast_for_us(msg)?
                 } else if let Some(next_hop) = msg.route.pop_front() {
-                    msg.trace.push_front(conn);
                     self.send_to(msg, next_hop)?;
                 }
             }

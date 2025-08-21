@@ -14,7 +14,7 @@ pub const DEFAULT_TTL: u8 = 16;
 
 #[derive(Clone, Debug)]
 pub struct RawMessage(pub Vec<u8>);
-#[derive(Copy, Clone, Serialize, Deserialize, Debug, Encode, Decode, PartialEq, Eq)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug, Encode, Decode, PartialEq, Eq, Hash)]
 pub struct ConnectionId(pub u64);
 
 #[derive(Clone, Debug)]
@@ -28,6 +28,8 @@ pub enum UnicastMessagePayload {
     KeyExchange1(KeyExchangeMessage),
     KeyExchange2(KeyExchangeMessage),
     EncryptedPayload(EncryptedMessage),
+    Ping(u16, std::time::SystemTime),
+    Pong(u16, std::time::SystemTime),
 }
 
 #[derive(Eq, PartialEq, Encode, Decode, Clone, Hash, Debug)]
@@ -107,7 +109,7 @@ pub enum MessagePayload {
     Disconnect,
 }
 
-#[derive(Debug, Encode, Decode, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Encode, Decode, Eq, PartialEq, Default, Clone, Hash)]
 pub struct Route(VecDeque<ConnectionId>);
 
 impl std::ops::Deref for Route {
