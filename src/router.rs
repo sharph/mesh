@@ -169,8 +169,12 @@ impl RouteDB {
             }
             rec.seen.insert(route.clone(), instant);
             rec.instants.insert(instant, route.clone());
+            if let Some(unicast_connection) = &rec.unicast_connection {
+                let _ = unicast_connection.add_route(route.clone());
+            }
             rec.seen.first_key_value().unwrap().0 == route
         } else {
+            log::debug!("new route observed for {:?}", id.base64());
             let mut rdb = RouteDBEntry::default();
             rdb.seen.insert(route.clone(), instant);
             rdb.instants.insert(instant, route.clone());
