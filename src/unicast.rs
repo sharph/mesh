@@ -210,6 +210,7 @@ struct CryptoState {
     decrypt_session: Option<EncryptionSession>,
     encrypt_session: Option<EncryptionSession>,
     key_exchange: Option<KeyExchange>,
+    key_exchange_message: Option<KeyExchangeMessage>,
 }
 
 impl CryptoState {
@@ -251,12 +252,21 @@ impl CryptoState {
             .public()
     }
 
-    fn handle_key_exhange_1(&mut self, kex_msg: &KeyExchangeMessage) -> Result<KeyExchangeMessage> {
+    fn handle_key_exchange_1(&mut self, kex_msg: &KeyExchangeMessage) -> Result<()> {
         let kex = KeyExchange::new_from_other_message(kex_msg);
         let public = kex.public();
         self.decrypt_session = Some(kex.into_encryption_session(kex_msg)?);
         log::debug!("decryption session set up!");
-        Ok(public)
+        self.key_exchange_message = Some(public);
+        Ok(())
+    }
+
+    fn has_key_exchange_2(&self) -> bool {
+        self.key_exchange_message.is_some()
+    }
+
+    fn get_key_exchange_2(&mut self) -> Option<KeyExchangeMessage> {
+        self.key_exchange_message.take()
     }
 
     fn handle_key_exchange_2(&mut self, kex_msg: &KeyExchangeMessage) -> Result<()> {
@@ -293,17 +303,27 @@ pub fn run_unicast_connection(
         loop {
             let has_route = routes.has_route();
             let ready = has_route && crypto_state.ready();
-            if has_route
-                && let Some(route) = routes.get_route()
-                && crypto_state.should_send_kex_1()
-                && let Ok(msg) = MeshMessage::unicast_sign(
-                    &our_id,
-                    their_id.clone(),
-                    route.clone(),
-                    UnicastMessagePayload::KeyExchange1(crypto_state.get_key_exchange_1()),
-                )
-            {
-                let _ = message_sending_tx.send(msg).await;
+            if has_route && let Some(route) = routes.get_route() {
+                if crypto_state.should_send_kex_1()
+                    && let Ok(msg) = MeshMessage::unicast_sign(
+                        &our_id,
+                        their_id.clone(),
+                        route.clone(),
+                        UnicastMessagePayload::KeyExchange1(crypto_state.get_key_exchange_1()),
+                    )
+                {
+                    let _ = message_sending_tx.send(msg).await;
+                }
+                if let Some(kex2) = crypto_state.get_key_exchange_2()
+                    && let Ok(msg) = MeshMessage::unicast_sign(
+                        &our_id,
+                        their_id.clone(),
+                        route.clone(),
+                        UnicastMessagePayload::KeyExchange2(kex2),
+                    )
+                {
+                    let _ = message_sending_tx.send(msg).await;
+                }
             }
             let option = tokio::select! {
                 msg = unicast_sending_rx.recv(), if ready => {
@@ -346,19 +366,7 @@ pub fn run_unicast_connection(
                             if !msg.signature_valid().unwrap_or(false) {
                                 continue;
                             }
-                            if let Some(route) = routes.get_route()
-                                && let Ok(reply) = crypto_state.handle_key_exhange_1(kex)
-                            {
-                                let Ok(msg) = MeshMessage::unicast_sign(
-                                    &our_id,
-                                    their_id.clone(),
-                                    route.clone(),
-                                    UnicastMessagePayload::KeyExchange2(reply),
-                                ) else {
-                                    continue;
-                                };
-                                let _ = message_sending_tx.send(msg).await;
-                            };
+                            let _ = crypto_state.handle_key_exchange_1(kex);
                         }
                         UnicastMessagePayload::KeyExchange2(kex) => {
                             if !msg.signature_valid().unwrap_or(false) {
