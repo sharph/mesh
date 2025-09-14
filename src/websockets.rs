@@ -11,7 +11,7 @@ use tokio_websockets::{ClientBuilder, ServerBuilder, WebSocketStream};
 
 use crate::crypto::{PrivateIdentity, PublicIdentity};
 use crate::proto::RawMessage;
-use crate::router::UntaggedConnection;
+use crate::router::{RouterMessage, UntaggedConnection};
 
 #[derive(Encode, Decode, Debug)]
 struct HelloMessage {
@@ -187,7 +187,7 @@ where
 }
 
 pub async fn connect_websockets<A>(
-    connection_sender: mpsc::Sender<(UntaggedConnection, Option<PublicIdentity>)>,
+    connection_sender: mpsc::Sender<RouterMessage>,
     id: PrivateIdentity,
     addr: A,
 ) -> Result<()>
@@ -201,13 +201,15 @@ where
         .await?
         .0;
     let connection = run_websockets_connection(ws_stream, id, false).await?;
-    let _ = connection_sender.send(connection).await;
+    let _ = connection_sender
+        .send(RouterMessage::AddConnection(connection.0, connection.1))
+        .await;
     log::debug!("handshake successful");
     Ok(())
 }
 
 pub async fn listen_websockets<A>(
-    connection_sender: mpsc::Sender<(UntaggedConnection, Option<PublicIdentity>)>,
+    connection_sender: mpsc::Sender<RouterMessage>,
     id: PrivateIdentity,
     addr: A,
 ) -> Result<JoinHandle<Result<()>>>
@@ -229,7 +231,9 @@ where
                 match run_websockets_connection(ws_stream, conn_id, true).await {
                     Ok(connection) => {
                         log::info!("websockets handshake successful");
-                        let _ = tx.send(connection).await;
+                        let _ = tx
+                            .send(RouterMessage::AddConnection(connection.0, connection.1))
+                            .await;
                     }
                     Err(err) => {
                         log::error!("handshake not successful");

@@ -10,6 +10,7 @@ use std::net::Ipv6Addr;
 
 use crate::crypto::{PublicIdentity, ShortId};
 use crate::proto::{self, UnicastMessage};
+use crate::router::RouterMessage;
 
 impl PublicIdentity {
     pub fn to_ipv6_address(&self) -> Ipv6Addr {
@@ -81,7 +82,7 @@ impl TunPayload {
 fn handle_packet(
     our_id: &PublicIdentity,
     packet: &Vec<u8>,
-    tx: &mut Sender<proto::UnicastMessage>,
+    tx: &mut Sender<RouterMessage>,
 ) -> Result<()> {
     let tun_payload = TunPayload::from_ipv6_packet(packet)?;
     if tun_payload.from_addr.segments()[0..2] != [0xfc00, 0x35]
@@ -92,11 +93,11 @@ fn handle_packet(
     if tun_payload.from_addr != our_id.to_ipv6_address() {
         bail!("packet not from our mesh id");
     }
-    tx.try_send(UnicastMessage {
+    tx.try_send(RouterMessage::SendUnicast(UnicastMessage {
         to: proto::UnicastDestination::ShortId(tun_payload.to_addr.octets()[4..16].try_into()?),
         from: our_id.clone(),
         payload: proto::UnicastPayload(1, tun_payload.to_mesh_message()),
-    })
+    }))
     .unwrap();
     Ok(())
 }
@@ -118,7 +119,7 @@ async fn handle_from_mesh(
 
 pub fn run_tun(
     id: &PublicIdentity,
-    mut unicast_out: Sender<proto::UnicastMessage>,
+    mut unicast_out: Sender<RouterMessage>,
 ) -> Result<Sender<proto::UnicastMessage>> {
     let (unicast_in_tx, mut unicast_in) = channel(64);
     let dev = DeviceBuilder::new()

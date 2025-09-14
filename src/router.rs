@@ -9,9 +9,9 @@ use crate::proto::{
     ConnectionId, DEFAULT_TTL, MeshMessage, MessagePayload, RawMessage, Route, TaggedRawMessage,
     UnicastDestination, UnicastMessage,
 };
-use crate::tun;
 use crate::unicast::{UnicastConnection, run_unicast_connection};
 use crate::websockets::{connect_websockets, listen_websockets};
+use crate::{router, tun};
 
 const FLOOD_DB_SIZE: usize = 1024 * 8;
 
@@ -189,26 +189,17 @@ struct RouterState {
     connections: Vec<Connection>,
     route_db: RouteDB,
     flood_db: FloodDB,
-    message_sending_tx: mpsc::Sender<MeshMessage>,
-    unicast_sending_tx: mpsc::Sender<UnicastMessage>,
-    unicast_receiving_tx: mpsc::Sender<UnicastMessage>,
+    tx: mpsc::Sender<RouterMessage>,
 }
 
 impl RouterState {
-    fn new(
-        id: PrivateIdentity,
-        message_sending_tx: mpsc::Sender<MeshMessage>,
-        unicast_sending_tx: mpsc::Sender<UnicastMessage>,
-        unicast_receiving_tx: mpsc::Sender<UnicastMessage>,
-    ) -> Self {
+    fn new(id: PrivateIdentity, tx: mpsc::Sender<RouterMessage>) -> Self {
         Self {
             id,
             connections: Vec::new(),
             route_db: RouteDB::default(),
             flood_db: FloodDB::default(),
-            message_sending_tx,
-            unicast_sending_tx,
-            unicast_receiving_tx,
+            tx,
         }
     }
 
@@ -216,7 +207,7 @@ impl RouterState {
         &mut self,
         connection: UntaggedConnection,
         id: Option<PublicIdentity>,
-        router_msg_tx: mpsc::Sender<TaggedRawMessage>,
+        router_tx: mpsc::Sender<RouterMessage>,
     ) -> Result<()> {
         let conn_id = ConnectionId(self.connections.len() as u64);
         let inbound = connection.2;
@@ -237,7 +228,11 @@ impl RouterState {
         tokio::spawn(async move {
             loop {
                 if let Some(msg) = rx.recv().await {
-                    if router_msg_tx.send(msg).await.is_err() {
+                    if router_tx
+                        .send(RouterMessage::IncomingMessage(msg))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -357,12 +352,8 @@ impl RouterState {
             bail!("no route")
         };
         if route_db_entry.unicast_connection.is_none() {
-            route_db_entry.unicast_connection = Some(run_unicast_connection(
-                self.id.clone(),
-                id,
-                self.message_sending_tx.clone(),
-                self.unicast_receiving_tx.clone(),
-            ));
+            route_db_entry.unicast_connection =
+                Some(run_unicast_connection(self.id.clone(), id, self.tx.clone()));
             route_db_entry
                 .unicast_connection
                 .as_mut()
@@ -393,13 +384,17 @@ pub struct RouterConfig {
     pub tun: bool,
 }
 
+pub enum RouterMessage {
+    AddConnection(UntaggedConnection, Option<PublicIdentity>),
+    IncomingMessage(TaggedRawMessage),
+    SendMessage(MeshMessage),
+    SendUnicast(UnicastMessage),
+    ReceiveUnicast(UnicastMessage),
+    SendFlood,
+}
+
 pub async fn run_router(config: &RouterConfig) -> Result<()> {
-    let (connection_tx, mut connection_rx) =
-        mpsc::channel::<(UntaggedConnection, Option<PublicIdentity>)>(64);
-    let (router_msg_tx, mut router_msg_rx) = mpsc::channel::<TaggedRawMessage>(64);
-    let (msg_sending_tx, mut msg_sending_rx) = mpsc::channel::<MeshMessage>(64);
-    let (unicast_sending_tx, mut unicast_sending_rx) = mpsc::channel::<UnicastMessage>(64);
-    let (unicast_receiving_tx, mut unicast_receiving_rx) = mpsc::channel::<UnicastMessage>(64);
+    let (router_tx, mut rx) = mpsc::channel::<RouterMessage>(64);
 
     let this_id = crypto::PrivateIdentity::new();
     let id = this_id.clone();
@@ -407,21 +402,15 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
     log::info!("public id: {}", id.public_id);
     log::info!("private key: {}", id.base64());
 
-    let mut state = RouterState::new(
-        this_id.clone(),
-        msg_sending_tx,
-        unicast_sending_tx.clone(),
-        unicast_receiving_tx,
-    );
+    let mut state = RouterState::new(this_id.clone(), router_tx.clone());
 
     let _listen_handles = config
         .websockets_listen
         .iter()
         .map(|addr| {
             log::info!("ws listening on {addr:?}");
-            let connection_sender = connection_tx.clone();
             tokio::spawn(listen_websockets(
-                connection_sender,
+                router_tx.clone(),
                 id.clone(),
                 addr.clone(),
             ))
@@ -432,9 +421,8 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
         .iter()
         .map(|addr| {
             log::info!("ws connecting to {addr:?}");
-            let connection_sender = connection_tx.clone();
             tokio::spawn(connect_websockets(
-                connection_sender,
+                router_tx.clone(),
                 id.clone(),
                 addr.clone(),
             ))
@@ -444,48 +432,47 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
     log::info!("your ipv6: {}", id.public_id.to_ipv6_address());
     let mut tun_tx = if config.tun {
         let id_for_tun = id.public_id.clone();
-        Some(tun::run_tun(&id_for_tun, unicast_sending_tx.clone())?)
+        Some(tun::run_tun(&id_for_tun, router_tx.clone())?)
     } else {
         None
     };
 
-    let (tx, mut flood_rx) = mpsc::channel(1);
+    let tx = router_tx.clone();
 
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            let Ok(_) = tx.send(()).await else { return };
+            let Ok(_) = tx.send(RouterMessage::SendFlood).await else {
+                return;
+            };
         }
     });
 
     loop {
-        tokio::select! {
-            Some((conn, id)) = connection_rx.recv() => {
-                state.add_connection(conn, id, router_msg_tx.clone())?;
-            }
-            Some(val) = router_msg_rx.recv() => {
-                // a message comes in from a remote connection
-                let _ = state.handle_message(val);
-            }
-            Some(msg) = msg_sending_rx.recv() => {
-                // some local service wants to send a MeshMessage
-                let _ = state.send_message(msg);
-            }
-            Some(msg) = unicast_sending_rx.recv() => {
-                // some local service wants to send a message.
-                // this codepath turns it into a MeshMessage and sends it
-                // out remotely
-                let _ = state.send_unicast_message(msg);
-            }
-            Some(msg) = unicast_receiving_rx.recv() => {
-                if let Some(ttx) = tun_tx.as_mut() {
-                    let _ = ttx.try_send(msg);
-                } else {
-                    log::debug!("unhandled unicast: {msg:?}");
+        if let Some(router_msg) = rx.recv().await {
+            match router_msg {
+                RouterMessage::AddConnection(conn, id) => {
+                    state.add_connection(conn, id, router_tx.clone())?
                 }
-            }
-            _ = flood_rx.recv() => {
-                let _ = state.send_flood();
+                RouterMessage::IncomingMessage(msg) => {
+                    let _ = state.handle_message(msg);
+                }
+                RouterMessage::SendMessage(msg) => {
+                    let _ = state.send_message(msg);
+                }
+                RouterMessage::SendUnicast(msg) => {
+                    let _ = state.send_unicast_message(msg);
+                }
+                RouterMessage::ReceiveUnicast(msg) => {
+                    if let Some(ttx) = tun_tx.as_mut() {
+                        let _ = ttx.try_send(msg);
+                    } else {
+                        log::debug!("unhandled unicast: {msg:?}");
+                    }
+                }
+                RouterMessage::SendFlood => {
+                    let _ = state.send_flood();
+                }
             }
         }
     }

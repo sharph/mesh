@@ -1,6 +1,7 @@
 use crate::{
     crypto::{EncryptionSession, KeyExchange, KeyExchangeMessage, PrivateIdentity, PublicIdentity},
     proto::{MeshMessage, MessagePayload, Route, UnicastMessage, UnicastMessagePayload},
+    router::RouterMessage,
 };
 use anyhow::{Result, anyhow, bail};
 use futures_util::future;
@@ -27,7 +28,7 @@ fn observation_task(
     our_id: PublicIdentity,
     their_id: PublicIdentity,
     route: Route,
-    mesh_tx: Sender<MeshMessage>,
+    mesh_tx: Sender<RouterMessage>,
     immediate: bool,
 ) -> (JoinHandle<()>, Sender<()>) {
     let (tx, mut rx) = channel(1);
@@ -39,7 +40,7 @@ fn observation_task(
                 route.clone(),
                 UnicastMessagePayload::Ping(0, std::time::SystemTime::now()),
             );
-            let _ = mesh_tx.try_send(ping);
+            let _ = mesh_tx.try_send(RouterMessage::SendMessage(ping));
         }
         loop {
             tokio::select! {
@@ -50,7 +51,7 @@ fn observation_task(
                         route.clone(),
                         UnicastMessagePayload::Ping(0, std::time::SystemTime::now()),
                     );
-                    let _ = mesh_tx.try_send(ping);
+                    let _ = mesh_tx.try_send(RouterMessage::SendMessage(ping));
                 },
                 _ = rx.recv() => {
                 }
@@ -65,10 +66,10 @@ impl RouteObservation {
         our_id: PublicIdentity,
         their_id: PublicIdentity,
         route: Route,
-        mesh_tx: Sender<MeshMessage>,
+        tx: Sender<RouterMessage>,
         immediate: bool,
     ) -> Self {
-        let (sensor, reset_tx) = observation_task(our_id, their_id, route, mesh_tx, immediate);
+        let (sensor, reset_tx) = observation_task(our_id, their_id, route, tx, immediate);
         Self {
             sensor,
             reset_tx,
@@ -106,14 +107,14 @@ impl Drop for RouteObservation {
 
 struct Routes {
     observations: HashMap<Route, RouteObservation>,
-    mesh_tx: Sender<MeshMessage>,
+    tx: Sender<RouterMessage>,
 }
 
 impl Routes {
-    fn new(mesh_tx: Sender<MeshMessage>) -> Self {
+    fn new(tx: Sender<RouterMessage>) -> Self {
         Self {
             observations: HashMap::default(),
-            mesh_tx,
+            tx,
         }
     }
 
@@ -122,7 +123,7 @@ impl Routes {
         msg: &RouteManagementMessage,
         our_id: &PublicIdentity,
         their_id: &PublicIdentity,
-        mesh_tx: &Sender<MeshMessage>,
+        tx: &Sender<RouterMessage>,
     ) {
         match msg {
             RouteManagementMessage::Add(route) => {
@@ -132,7 +133,7 @@ impl Routes {
                         our_id.clone(),
                         their_id.clone(),
                         route.clone(),
-                        mesh_tx.clone(),
+                        tx.clone(),
                         true,
                     ),
                 );
@@ -290,13 +291,12 @@ enum UnicastOption {
 pub fn run_unicast_connection(
     our_id: PrivateIdentity,
     their_id: PublicIdentity,
-    message_sending_tx: Sender<MeshMessage>,
-    unicast_receiving_tx: Sender<UnicastMessage>,
+    tx: Sender<RouterMessage>,
 ) -> UnicastConnection {
     let (route_management_tx, mut route_mgmt_rx) = channel(64);
     let (message_receiving_tx, mut message_receiving_rx) = channel(64);
     let (unicast_sending_tx, mut unicast_sending_rx) = channel(64);
-    let mut routes = Routes::new(message_sending_tx.clone());
+    let mut routes = Routes::new(tx.clone());
     log::info!("new unicast connection {:?}", their_id.base64());
     let mut crypto_state = CryptoState::default();
     tokio::spawn(async move {
@@ -312,7 +312,7 @@ pub fn run_unicast_connection(
                         UnicastMessagePayload::KeyExchange1(crypto_state.get_key_exchange_1()),
                     )
                 {
-                    let _ = message_sending_tx.send(msg).await;
+                    let _ = tx.send(RouterMessage::SendMessage(msg)).await;
                 }
                 if let Some(kex2) = crypto_state.get_key_exchange_2()
                     && let Ok(msg) = MeshMessage::unicast_sign(
@@ -322,7 +322,7 @@ pub fn run_unicast_connection(
                         UnicastMessagePayload::KeyExchange2(kex2),
                     )
                 {
-                    let _ = message_sending_tx.send(msg).await;
+                    let _ = tx.send(RouterMessage::SendMessage(msg)).await;
                 }
             }
             let option = tokio::select! {
@@ -358,7 +358,7 @@ pub fn run_unicast_connection(
                         UnicastMessagePayload::EncryptedPayload(_) => {
                             if let Ok(uni_msg) = crypto_state.decrypt_mesh_message(&msg) {
                                 // convert a message from the mesh into a local message
-                                let _ = unicast_receiving_tx.send(uni_msg).await;
+                                let _ = tx.send(RouterMessage::ReceiveUnicast(uni_msg)).await;
                             }
                             // TODO: fix broken sessions
                         }
@@ -381,7 +381,7 @@ pub fn run_unicast_connection(
                                 msg.trace.clone(),
                                 UnicastMessagePayload::Pong(*val, *t),
                             );
-                            let _ = message_sending_tx.send(msg).await;
+                            let _ = tx.send(RouterMessage::SendMessage(msg)).await;
                         }
                         UnicastMessagePayload::Pong(val, t) => {
                             let _ = routes.observe_route(&msg.trace, &(*val, *t));
@@ -396,11 +396,11 @@ pub fn run_unicast_connection(
                             route.clone(),
                         )
                     {
-                        let _ = message_sending_tx.send(msg).await;
+                        let _ = tx.send(RouterMessage::SendMessage(msg)).await;
                     }
                 }
                 UnicastOption::RouteManagement(msg) => {
-                    routes.handle_message(&msg, &our_id.public_id, &their_id, &message_sending_tx);
+                    routes.handle_message(&msg, &our_id.public_id, &their_id, &tx);
                 }
                 UnicastOption::EndConnection => break,
             };
