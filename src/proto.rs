@@ -14,7 +14,9 @@ pub const DEFAULT_TTL: u8 = 16;
 
 #[derive(Clone, Debug)]
 pub struct RawMessage(pub Vec<u8>);
-#[derive(Copy, Clone, Serialize, Deserialize, Debug, Encode, Decode, PartialEq, Eq, Hash)]
+#[derive(
+    Copy, Clone, Serialize, Deserialize, Debug, Encode, Decode, PartialEq, Eq, Hash, Ord, PartialOrd,
+)]
 pub struct ConnectionId(pub u64);
 
 #[derive(Clone, Debug)]
@@ -109,7 +111,7 @@ pub enum MessagePayload {
     Disconnect,
 }
 
-#[derive(Debug, Encode, Decode, Eq, PartialEq, Default, Clone, Hash)]
+#[derive(Debug, Encode, Decode, Eq, PartialEq, Default, Clone, Hash, PartialOrd, Ord)]
 pub struct Route(VecDeque<ConnectionId>);
 
 impl std::ops::Deref for Route {
@@ -123,18 +125,6 @@ impl std::ops::Deref for Route {
 impl std::ops::DerefMut for Route {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
-    }
-}
-
-impl PartialOrd for Route {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.0.len().cmp(&other.0.len()))
-    }
-}
-
-impl Ord for Route {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap()
     }
 }
 

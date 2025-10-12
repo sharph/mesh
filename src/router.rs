@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -9,11 +10,12 @@ use crate::proto::{
     ConnectionId, DEFAULT_TTL, MeshMessage, MessagePayload, RawMessage, Route, TaggedRawMessage,
     UnicastDestination, UnicastMessage,
 };
+use crate::tun;
 use crate::unicast::{UnicastConnection, run_unicast_connection};
 use crate::websockets::{connect_websockets, listen_websockets};
-use crate::{router, tun};
 
 const FLOOD_DB_SIZE: usize = 1024 * 8;
+const FLOOD_ANNOUNCE_SEC: u64 = 10;
 
 pub struct UntaggedConnection(
     pub mpsc::Sender<RawMessage>,
@@ -112,11 +114,119 @@ impl FloodDB {
         updated
     }
 }
+
+#[derive(Eq, PartialEq, Clone)]
+struct SortableByLength<T>(T);
+
+impl<T> SortableByLength<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> From<T> for SortableByLength<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> Deref for SortableByLength<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for SortableByLength<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T, X> PartialOrd for SortableByLength<T>
+where
+    T: PartialOrd,
+    T: Eq,
+    T: Ord,
+    T: PartialEq,
+    T: Deref<Target = VecDeque<X>>,
+    X: Ord,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T, X> Ord for SortableByLength<T>
+where
+    T: PartialOrd,
+    T: Eq,
+    T: Ord,
+    T: PartialEq,
+    T: Deref<Target = VecDeque<X>>,
+    X: Ord,
+{
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.0.len().cmp(&other.0.len()) {
+            std::cmp::Ordering::Less => std::cmp::Ordering::Less,
+            std::cmp::Ordering::Greater => std::cmp::Ordering::Greater,
+            std::cmp::Ordering::Equal => self.0.iter().cmp(other.0.iter()),
+        }
+    }
+}
+
 #[derive(Default)]
 struct RouteDBEntry {
-    seen: BTreeMap<Route, Instant>,
-    instants: BTreeMap<Instant, Route>,
+    seen: BTreeMap<SortableByLength<Route>, Instant>, // btree so that length stays sorted
     unicast_connection: Option<UnicastConnection>,
+}
+
+impl RouteDBEntry {
+    async fn observe(&mut self, route: &Route) {
+        let now = Instant::now();
+        let mut close = false;
+        if self.seen.insert(route.clone().into(), now).is_none()
+            && let Some(connection) = &self.unicast_connection
+            && connection.add_route(route.clone()).await.is_err()
+        {
+            close = true;
+        }
+        if close {
+            self.unicast_connection = None;
+        }
+    }
+
+    async fn trim(&mut self, del_before: &Instant) {
+        let mut close = false;
+        if let Some(connection) = &self.unicast_connection {
+            for (route, _instant) in self
+                .seen
+                .iter()
+                .filter(|(_route, instant)| *instant < del_before)
+            {
+                if connection
+                    .delete_route(route.clone().into_inner())
+                    .await
+                    .is_err()
+                {
+                    close = true;
+                    break;
+                }
+            }
+        }
+        if close {
+            self.unicast_connection = None;
+        }
+        self.seen.retain(|_route, instant| *instant >= *del_before);
+    }
+
+    fn shortest_route(&self) -> Option<&Route> {
+        self.seen.first_key_value().map(|(k, _v)| k.deref())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.seen.len() == 0
+    }
 }
 
 #[derive(Default)]
@@ -128,7 +238,7 @@ struct RouteDB {
 impl RouteDB {
     fn is_route_in_db(&self, id: &PublicIdentity, route: &Route) -> bool {
         if let Some(db_entry) = self.routes.get(id) {
-            db_entry.seen.contains_key(route)
+            db_entry.seen.contains_key(&route.clone().into())
         } else {
             false
         }
@@ -136,6 +246,13 @@ impl RouteDB {
 
     fn get_route(&mut self, id: &PublicIdentity) -> Option<&mut RouteDBEntry> {
         self.routes.get_mut(id)
+    }
+
+    fn get_or_create_route(&mut self, id: &PublicIdentity) -> &mut RouteDBEntry {
+        if !self.routes.contains_key(id) {
+            self.routes.insert(id.clone(), RouteDBEntry::default());
+        }
+        self.routes.get_mut(id).unwrap()
     }
 
     fn get_route_for_unicast_destination(
@@ -157,29 +274,30 @@ impl RouteDB {
         }
     }
 
-    fn trim_routes(&mut self) {}
+    async fn trim_routes(&mut self) {
+        let Some(del_before) =
+            Instant::now().checked_sub(Duration::from_secs(FLOOD_ANNOUNCE_SEC * 3))
+        else {
+            return;
+        };
+        for (_id, route_entry) in self.routes.iter_mut() {
+            route_entry.trim(&del_before).await;
+        }
+    }
 
     /// Adds route to db and returns true if route is shortest
-    fn observe_route(&mut self, id: &PublicIdentity, route: &Route) -> bool {
+    async fn observe_route(&mut self, id: &PublicIdentity, route: &Route) -> bool {
         let instant = Instant::now();
         self.short_id_lookup.insert(id.short_id(), id.clone());
-        if let Some(rec) = self.routes.get_mut(id) {
-            if let Some(old_instant) = rec.seen.remove(route) {
-                rec.instants.remove(&old_instant).unwrap();
-            }
-            rec.seen.insert(route.clone(), instant);
-            rec.instants.insert(instant, route.clone());
-            if let Some(unicast_connection) = &rec.unicast_connection {
-                let _ = unicast_connection.add_route(route.clone());
-            }
-            rec.seen.first_key_value().unwrap().0 == route
-        } else {
-            log::debug!("new route observed for {:?}", id.base64());
-            let mut rdb = RouteDBEntry::default();
-            rdb.seen.insert(route.clone(), instant);
-            rdb.instants.insert(instant, route.clone());
-            self.routes.insert(id.clone(), rdb);
+        let rec = self.get_or_create_route(id);
+        rec.observe(route).await;
+        rec.trim(&instant).await;
+        if let Some(shortest) = rec.shortest_route()
+            && shortest.len() == route.len()
+        {
             true
+        } else {
+            false
         }
     }
 }
@@ -262,7 +380,7 @@ impl RouterState {
         Ok(())
     }
 
-    fn handle_flood(&mut self, msg: &MeshMessage, from: ConnectionId) -> Result<()> {
+    async fn handle_flood(&mut self, msg: &MeshMessage, from: ConnectionId) -> Result<()> {
         let mut msg = msg.clone();
         if !msg.signature_valid()? {
             bail!("signature invalid");
@@ -274,8 +392,8 @@ impl RouterState {
             let in_flood_db = self
                 .flood_db
                 .update(FloodDBEntry::new(from_id.clone(), msg.payload.clone()));
-            let best_in_route_db = self.route_db.observe_route(from_id, &msg.trace);
-            if (in_flood_db && best_in_route_db) || (msg.ttl as usize) < msg.trace.len() {
+            let best_in_route_db = self.route_db.observe_route(from_id, &msg.trace).await;
+            if (in_flood_db && !best_in_route_db) || (msg.ttl as usize) < msg.trace.len() {
                 return Ok(());
             }
             self.send_to_all(msg.clone(), Some(from))?;
@@ -325,15 +443,15 @@ impl RouterState {
         Ok(())
     }
 
-    fn handle_message(&mut self, msg: TaggedRawMessage) -> Result<()> {
+    async fn handle_message(&mut self, msg: TaggedRawMessage) -> Result<()> {
         let conn = msg.connection_id;
         let mut msg = MeshMessage::try_from(msg.msg)?;
         match msg.payload {
-            MessagePayload::Flood(_) => self.handle_flood(&msg, conn)?,
+            MessagePayload::Flood(_) => self.handle_flood(&msg, conn).await?,
             MessagePayload::Unicast(_) => {
                 msg.trace.push_front(conn);
                 if msg.to.as_ref() == Some(&self.id.public_id) || msg.route.is_empty() {
-                    self.handle_unicast_for_us(msg)?
+                    self.handle_unicast_for_us(msg).await?
                 } else if let Some(next_hop) = msg.route.pop_front() {
                     self.send_to(msg, next_hop)?;
                 }
@@ -343,12 +461,13 @@ impl RouterState {
         Ok(())
     }
 
-    fn get_unicast_connection(
+    async fn get_unicast_connection(
         &mut self,
         dest: &UnicastDestination,
     ) -> Result<&mut UnicastConnection> {
         let Some((id, route_db_entry)) = self.route_db.get_route_for_unicast_destination(dest)
         else {
+            log::debug!("no route to connect to {:?}", dest);
             bail!("no route")
         };
         if route_db_entry.unicast_connection.is_none() {
@@ -358,21 +477,33 @@ impl RouterState {
                 .unicast_connection
                 .as_mut()
                 .unwrap()
-                .add_route(route_db_entry.seen.first_key_value().unwrap().0.clone())?;
+                .add_route(
+                    route_db_entry
+                        .seen
+                        .first_key_value()
+                        .unwrap()
+                        .0
+                        .clone()
+                        .into_inner(),
+                )
+                .await?;
         }
         Ok(route_db_entry.unicast_connection.as_mut().unwrap())
     }
 
-    fn handle_unicast_for_us(&mut self, msg: MeshMessage) -> Result<()> {
+    async fn handle_unicast_for_us(&mut self, msg: MeshMessage) -> Result<()> {
         self.get_unicast_connection(&UnicastDestination::PublicIdentity(
             msg.from.as_ref().ok_or(anyhow!("no from field"))?.clone(),
-        ))?
+        ))
+        .await?
         .receive_mesh_message(msg)?;
         Ok(())
     }
 
-    fn send_unicast_message(&mut self, msg: UnicastMessage) -> Result<()> {
-        self.get_unicast_connection(&msg.to)?.send_unicast(msg)?;
+    async fn send_unicast_message(&mut self, msg: UnicastMessage) -> Result<()> {
+        self.get_unicast_connection(&msg.to)
+            .await?
+            .send_unicast(msg)?;
         // TODO: detect closed connections
         Ok(())
     }
@@ -455,13 +586,13 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
                     state.add_connection(conn, id, router_tx.clone())?
                 }
                 RouterMessage::IncomingMessage(msg) => {
-                    let _ = state.handle_message(msg);
+                    let _ = state.handle_message(msg).await;
                 }
                 RouterMessage::SendMessage(msg) => {
                     let _ = state.send_message(msg);
                 }
                 RouterMessage::SendUnicast(msg) => {
-                    let _ = state.send_unicast_message(msg);
+                    let _ = state.send_unicast_message(msg).await;
                 }
                 RouterMessage::ReceiveUnicast(msg) => {
                     if let Some(ttx) = tun_tx.as_mut() {
@@ -472,6 +603,7 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
                 }
                 RouterMessage::SendFlood => {
                     let _ = state.send_flood();
+                    state.route_db.trim_routes().await;
                 }
             }
         }
