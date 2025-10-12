@@ -193,16 +193,18 @@ impl UnicastConnection {
         Ok(self.message_receiving_tx.try_send(msg)?)
     }
 
-    pub fn add_route(&self, route: Route) -> Result<()> {
-        Ok(self
-            .route_management_tx
-            .try_send(RouteManagementMessage::Add(route))?)
+    pub async fn add_route(&self, route: Route) -> Result<()> {
+        self.route_management_tx
+            .send(RouteManagementMessage::Add(route))
+            .await?;
+        Ok(())
     }
 
-    pub fn delete_route(&self, route: Route) -> Result<()> {
-        Ok(self
-            .route_management_tx
-            .try_send(RouteManagementMessage::Delete(route))?)
+    pub async fn delete_route(&self, route: Route) -> Result<()> {
+        self.route_management_tx
+            .send(RouteManagementMessage::Delete(route))
+            .await?;
+        Ok(())
     }
 }
 

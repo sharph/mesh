@@ -9,11 +9,12 @@ use crate::proto::{
     ConnectionId, DEFAULT_TTL, MeshMessage, MessagePayload, RawMessage, Route, TaggedRawMessage,
     UnicastDestination, UnicastMessage,
 };
+use crate::tun;
 use crate::unicast::{UnicastConnection, run_unicast_connection};
 use crate::websockets::{connect_websockets, listen_websockets};
-use crate::{router, tun};
 
 const FLOOD_DB_SIZE: usize = 1024 * 8;
+const FLOOD_ANNOUNCE_SEC: u64 = 10;
 
 pub struct UntaggedConnection(
     pub mpsc::Sender<RawMessage>,
@@ -114,9 +115,49 @@ impl FloodDB {
 }
 #[derive(Default)]
 struct RouteDBEntry {
-    seen: BTreeMap<Route, Instant>,
-    instants: BTreeMap<Instant, Route>,
+    seen: HashMap<Route, Instant>,
     unicast_connection: Option<UnicastConnection>,
+}
+
+impl RouteDBEntry {
+    async fn observe(&mut self, route: &Route) {
+        let now = Instant::now();
+        let mut close = false;
+        if self.seen.insert(route.clone(), now).is_none()
+            && let Some(connection) = &self.unicast_connection
+        {
+            if connection.add_route(route.clone()).await.is_err() {
+                close = true;
+            }
+        }
+        if close {
+            self.unicast_connection = None;
+        }
+    }
+
+    async fn trim(&mut self, del_before: &Instant) {
+        let mut close = false;
+        if let Some(connection) = &self.unicast_connection {
+            for (route, _instant) in self
+                .seen
+                .iter()
+                .filter(|(_route, instant)| *instant < del_before)
+            {
+                if connection.delete_route(route.clone()).await.is_err() {
+                    close = true;
+                    break;
+                }
+            }
+        }
+        if close {
+            self.unicast_connection = None;
+        }
+        self.seen.retain(|_route, instant| *instant >= *del_before);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.seen.len() == 0
+    }
 }
 
 #[derive(Default)]
@@ -138,6 +179,8 @@ impl RouteDB {
         self.routes.get_mut(id)
     }
 
+    fn get_or_create_route(&mut self, id: &PublicIdentity) -> &mut RouteDBEntry {}
+
     fn get_route_for_unicast_destination(
         &mut self,
         dest: &UnicastDestination,
@@ -157,15 +200,29 @@ impl RouteDB {
         }
     }
 
-    fn trim_routes(&mut self) {}
+    async fn trim_routes(&mut self) {
+        let Some(del_before) =
+            Instant::now().checked_sub(Duration::from_secs(FLOOD_ANNOUNCE_SEC * 3))
+        else {
+            return;
+        };
+        for (_id, route_entry) in self.routes.iter_mut() {
+            route_entry.trim(&del_before).await;
+        }
+    }
 
     /// Adds route to db and returns true if route is shortest
-    fn observe_route(&mut self, id: &PublicIdentity, route: &Route) -> bool {
+    async fn observe_route(&mut self, id: &PublicIdentity, route: &Route) -> bool {
         let instant = Instant::now();
         self.short_id_lookup.insert(id.short_id(), id.clone());
         if let Some(rec) = self.routes.get_mut(id) {
             if let Some(old_instant) = rec.seen.remove(route) {
                 rec.instants.remove(&old_instant).unwrap();
+            } else {
+                log::debug!(
+                    "new route observed for {:?} in existing routedb entry",
+                    id.base64()
+                );
             }
             rec.seen.insert(route.clone(), instant);
             rec.instants.insert(instant, route.clone());
@@ -472,6 +529,7 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
                 }
                 RouterMessage::SendFlood => {
                     let _ = state.send_flood();
+                    state.route_db.trim_routes();
                 }
             }
         }
