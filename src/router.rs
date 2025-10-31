@@ -115,7 +115,7 @@ impl FloodDB {
     }
 }
 
-#[derive(Eq, PartialEq, Clone)]
+#[derive(Eq, PartialEq, Clone, Hash)]
 struct SortableByLength<T>(T);
 
 impl<T> SortableByLength<T> {
@@ -291,7 +291,11 @@ impl RouteDB {
         self.short_id_lookup.insert(id.short_id(), id.clone());
         let rec = self.get_or_create_route(id);
         rec.observe(route).await;
-        rec.trim(&instant).await;
+        log::debug!(
+            "this route {:?}, shortest {:?}",
+            route.len(),
+            rec.shortest_route().map(|r| r.len())
+        );
         if let Some(shortest) = rec.shortest_route()
             && shortest.len() == route.len()
         {
