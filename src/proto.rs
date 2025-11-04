@@ -12,8 +12,15 @@ use crate::crypto::{
 
 pub const DEFAULT_TTL: u8 = 16;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawMessage(pub Vec<u8>);
+
+impl RawMessage {
+    pub fn new(msg: Vec<u8>) -> Self {
+        Self(msg)
+    }
+}
+
 #[derive(
     Copy, Clone, Serialize, Deserialize, Debug, Encode, Decode, PartialEq, Eq, Hash, Ord, PartialOrd,
 )]

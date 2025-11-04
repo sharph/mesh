@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap_conf::prelude::*;
 
 mod crypto;
+mod packetizer;
 mod proto;
 mod router;
 mod tun;
