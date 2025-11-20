@@ -1,21 +1,27 @@
 use crate::proto::RawMessage;
 use anyhow::{Result, anyhow, bail};
+use bincode::{Decode, Encode};
 use std::collections::VecDeque;
 
-struct Packet(Vec<u8>);
+#[derive(Encode, Decode, Debug)]
+pub struct Packet(Vec<u8>);
 
 impl Packet {
-    fn new(val: Vec<u8>) -> Self {
+    pub fn new(val: Vec<u8>) -> Self {
         Self(val)
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.0
     }
 }
 
-struct Packetizer {
+pub struct Packetizer {
     count: u16,
     size: usize,
 }
 
-struct PacketizedMessage {
+pub struct PacketizedMessage {
     msg: RawMessage,
     msg_id: u16,
     chunk_id: u16,
@@ -60,34 +66,33 @@ impl Iterator for PacketizedMessage {
 }
 
 impl Packetizer {
-    fn new(size: usize) -> Self {
+    pub fn new(size: usize) -> Self {
         Self {
             count: u16::MAX,
             size,
         }
     }
 
-    fn packetize(&mut self, msg: RawMessage) -> PacketizedMessage {
+    pub fn packetize(&mut self, msg: RawMessage) -> PacketizedMessage {
         self.count = self.count.wrapping_add(1);
         PacketizedMessage::new(msg, self.count, self.size)
     }
 }
 
-struct Depacketizer {
+pub struct Depacketizer {
     buffer: VecDeque<(u16, u16, Vec<Option<Vec<u8>>>)>,
     size: usize,
 }
 
 impl Depacketizer {
-    fn new(size: usize) -> Self {
+    pub fn new(size: usize) -> Self {
         Self {
             buffer: VecDeque::new(),
             size,
         }
     }
 
-    fn read_packet(&mut self, packet: Packet) -> Result<Option<RawMessage>> {
-        println!("{:?}", packet.0);
+    pub fn read_packet(&mut self, packet: Packet) -> Result<Option<RawMessage>> {
         let msg_id = u16::from_be_bytes(packet.0.as_slice()[0..2].try_into()?);
         let chunk_id = u16::from_be_bytes(packet.0.as_slice()[2..4].try_into()?);
         let chunk_count = u16::from_be_bytes(packet.0.as_slice()[4..6].try_into()?);

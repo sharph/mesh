@@ -19,6 +19,10 @@ impl RawMessage {
     pub fn new(msg: Vec<u8>) -> Self {
         Self(msg)
     }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.0
+    }
 }
 
 #[derive(
