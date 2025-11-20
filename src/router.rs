@@ -23,10 +23,7 @@ pub struct UntaggedConnection(
     pub bool,
 );
 
-pub struct TaggedConnection(
-    mpsc::Sender<RawMessage>,
-    mpsc::UnboundedReceiver<TaggedRawMessage>,
-);
+pub struct TaggedConnection(mpsc::Sender<RawMessage>, mpsc::Receiver<TaggedRawMessage>);
 
 struct Connection {
     connection_id: ConnectionId,
@@ -57,11 +54,15 @@ fn tag_connection(
     connection_id: ConnectionId,
 ) -> TaggedConnection {
     let sender = connection.0.clone();
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
         loop {
             if let Some(msg) = connection.1.recv().await {
-                if tx.send(TaggedRawMessage { connection_id, msg }).is_err() {
+                if tx
+                    .send(TaggedRawMessage { connection_id, msg })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             } else {
@@ -351,12 +352,14 @@ impl RouterState {
             loop {
                 if let Some(msg) = rx.recv().await {
                     if router_tx
-                        .send(RouterMessage::IncomingMessage(msg))
-                        .await
+                        .try_send(RouterMessage::IncomingMessage(msg))
                         .is_err()
+                        && router_tx.is_closed()
                     {
                         return;
                     }
+                } else {
+                    break;
                 }
             }
         });
