@@ -229,7 +229,7 @@ async fn udp_session(
     let (tx_to_router, to_router) = channel::<RawMessage>(1);
     let mut to_router = Some(to_router);
     let mut session = UdpSession::new(addr, to_net, tx_to_router, our_id);
-    tokio::spawn(async move {
+    tokio::task::spawn_local(async move {
         if !inbound {
             session.send_initiation().await?;
         }
@@ -274,7 +274,7 @@ where
     let mut sessions: HashMap<SocketAddr, Sender<Vec<u8>>> = HashMap::new();
     let sock = UdpSocket::bind(addr).await?;
     let mut buf = [0; 1024];
-    tokio::spawn(async move {
+    tokio::task::spawn_local(async move {
         loop {
             tokio::select! {
                 res = sock.recv_from(&mut buf) => {

@@ -32,7 +32,7 @@ fn observation_task(
     immediate: bool,
 ) -> (JoinHandle<()>, Sender<()>) {
     let (tx, mut rx) = channel(1);
-    let join_handle = tokio::spawn(async move {
+    let join_handle = tokio::task::spawn_local(async move {
         if immediate {
             let ping = MeshMessage::unicast(
                 our_id.clone(),
@@ -303,7 +303,7 @@ pub fn run_unicast_connection(
     let mut routes = Routes::new(tx.clone());
     log::info!("new unicast connection {:?}", their_id.base64());
     let mut crypto_state = CryptoState::default();
-    tokio::spawn(async move {
+    tokio::task::spawn_local(async move {
         loop {
             let has_route = routes.has_route();
             let ready = has_route && crypto_state.ready();

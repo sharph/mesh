@@ -130,7 +130,7 @@ pub fn run_tun(
     let mut framed = DeviceFramed::new(dev, BytesCodec::new());
 
     let id = id.clone();
-    tokio::spawn(async move {
+    tokio::task::spawn_local(async move {
         let our_ip = id.to_ipv6_address();
         loop {
             tokio::select! {

@@ -56,7 +56,7 @@ fn tag_connection(
 ) -> TaggedConnection {
     let sender = connection.0.clone();
     let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
+    tokio::task::spawn_local(async move {
         loop {
             if let Some(msg) = connection.1.recv().await {
                 if tx
@@ -349,7 +349,7 @@ impl RouterState {
             tx: Some(tx),
             inbound,
         });
-        tokio::spawn(async move {
+        tokio::task::spawn_local(async move {
             loop {
                 if let Some(msg) = rx.recv().await {
                     if router_tx
@@ -550,7 +550,7 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
         .iter()
         .map(|addr| {
             log::info!("ws listening on {addr:?}");
-            tokio::spawn(listen_websockets(
+            tokio::task::spawn_local(listen_websockets(
                 router_tx.clone(),
                 id.clone(),
                 addr.clone(),
@@ -562,7 +562,7 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
         .iter()
         .map(|addr| {
             log::info!("ws connecting to {addr:?}");
-            tokio::spawn(connect_websockets(
+            tokio::task::spawn_local(connect_websockets(
                 router_tx.clone(),
                 id.clone(),
                 addr.clone(),
@@ -589,7 +589,7 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
 
     let tx = router_tx.clone();
 
-    tokio::spawn(async move {
+    tokio::task::spawn_local(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let Ok(_) = tx.send(RouterMessage::SendFlood).await else {

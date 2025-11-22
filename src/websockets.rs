@@ -158,7 +158,7 @@ where
     let (in_tx, in_rx) = mpsc::channel(64);
     let (out_tx, mut out_rx) = mpsc::channel::<RawMessage>(64);
 
-    tokio::spawn(async move {
+    tokio::task::spawn_local(async move {
         loop {
             let from_ws = wss.next();
             let from_router = out_rx.recv();
@@ -218,12 +218,12 @@ where
 {
     let listener = TcpListener::bind(addr).await?;
     log::info!("websockets listening");
-    let listening = tokio::spawn(async move {
+    let listening = tokio::task::spawn_local(async move {
         while let Ok((stream, _)) = listener.accept().await {
             log::info!("new websockets connection");
             let tx = connection_sender.clone();
             let conn_id = id.clone();
-            tokio::spawn(async move {
+            tokio::task::spawn_local(async move {
                 let Ok((_, ws_stream)) = ServerBuilder::new().accept(stream).await else {
                     log::error!("websockets failed");
                     return;

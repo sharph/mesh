@@ -33,44 +33,50 @@ async fn main() -> Result<()> {
         .arg("udp_listen_address")
         .env("MESH_UDP_LISTEN_ADDRESS")
         .def("");
-    router::run_router(&router::RouterConfig {
-        websockets_connect: cfg
-            .grab()
-            .conf("connect.addresses")
-            .arg("connect_addresses")
-            .env("MESH_WS_CONNECT_ADDRESSES")
-            .def("")
-            .split(",")
-            .filter(|s| s != &"")
-            .map(|s| s.to_string())
-            .collect(),
-        websockets_listen: cfg
-            .grab()
-            .conf("listen.addresses")
-            .arg("listen_addresses")
-            .env("MESH_WS_LISTEN_ADDRESSES")
-            .def("")
-            .split(",")
-            .filter(|s| s != &"")
-            .map(|s| s.to_string())
-            .collect(),
-        udp_listen: if !udp_listen.is_empty() {
-            Some(udp_listen)
-        } else {
-            None
-        },
-        udp_connect: cfg
-            .grab()
-            .conf("udp.connect.addresses")
-            .arg("udp_connect_addresses")
-            .env("MESH_UDP_CONNECT_ADDRESSES")
-            .def("")
-            .split(",")
-            .filter(|s| s != &"")
-            .map(|s| s.to_string())
-            .collect(),
-        tun: cfg.grab().arg("tun").def("false") == "true",
-    })
-    .await?;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            router::run_router(&router::RouterConfig {
+                websockets_connect: cfg
+                    .grab()
+                    .conf("connect.addresses")
+                    .arg("connect_addresses")
+                    .env("MESH_WS_CONNECT_ADDRESSES")
+                    .def("")
+                    .split(",")
+                    .filter(|s| s != &"")
+                    .map(|s| s.to_string())
+                    .collect(),
+                websockets_listen: cfg
+                    .grab()
+                    .conf("listen.addresses")
+                    .arg("listen_addresses")
+                    .env("MESH_WS_LISTEN_ADDRESSES")
+                    .def("")
+                    .split(",")
+                    .filter(|s| s != &"")
+                    .map(|s| s.to_string())
+                    .collect(),
+                udp_listen: if !udp_listen.is_empty() {
+                    Some(udp_listen)
+                } else {
+                    None
+                },
+                udp_connect: cfg
+                    .grab()
+                    .conf("udp.connect.addresses")
+                    .arg("udp_connect_addresses")
+                    .env("MESH_UDP_CONNECT_ADDRESSES")
+                    .def("")
+                    .split(",")
+                    .filter(|s| s != &"")
+                    .map(|s| s.to_string())
+                    .collect(),
+                tun: cfg.grab().arg("tun").def("false") == "true",
+            })
+            .await?;
+            Ok(()) as Result<()>
+        })
+        .await?;
     Ok(())
 }
