@@ -12,7 +12,7 @@ use rand::rngs::OsRng;
 use tokio::net::{ToSocketAddrs, UdpSocket, lookup_host};
 use tokio::sync::mpsc::{Sender, channel};
 
-const MAX_PAYLOAD_SIZE: usize = 490;
+const MAX_PAYLOAD_SIZE: usize = 800;
 
 #[derive(Encode, Decode, Debug, Clone, Eq, PartialEq)]
 struct UdpSessionIdentity(u16, PublicIdentity);
