@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use crate::crypto::{PrivateIdentity, PublicIdentity};
 use crate::packetizer::{Depacketizer, Packet, Packetizer};
@@ -13,6 +14,8 @@ use tokio::net::{ToSocketAddrs, UdpSocket, lookup_host};
 use tokio::sync::mpsc::{Sender, channel};
 
 const MAX_PAYLOAD_SIZE: usize = 800;
+const HEARTBEAT_PERIOD: std::time::Duration = Duration::from_secs(1);
+const CONNECTION_TIMEOUT: std::time::Duration = Duration::from_secs(5);
 
 #[derive(Encode, Decode, Debug, Clone, Eq, PartialEq)]
 struct UdpSessionIdentity(u16, PublicIdentity);
@@ -63,6 +66,7 @@ struct UdpSession {
     packetizer: Packetizer,
     depacketizer: Depacketizer,
     our_id: PrivateIdentity,
+    timeouts: u16,
 }
 
 impl UdpSession {
@@ -80,6 +84,7 @@ impl UdpSession {
             packetizer: Packetizer::new(MAX_PAYLOAD_SIZE),
             depacketizer: Depacketizer::new(16),
             our_id,
+            timeouts: 0,
         }
     }
 
@@ -117,6 +122,28 @@ impl UdpSession {
         )))
         .await?;
         self.state = UdpSessionState::Establishing(sess_id);
+        Ok(())
+    }
+
+    fn send_heartbeat(&mut self) -> Result<()> {
+        if let UdpSessionState::Established(sid) = &self.state {
+            self.try_send_net(UdpPacket::Establish(UdpSessionIdentity(
+                sid.0,
+                self.our_id.public_id.clone(),
+            )))?;
+        } else {
+            bail!("connection not established");
+        }
+        Ok(())
+    }
+
+    fn disconnect(&mut self) -> Result<()> {
+        if let UdpSessionState::Established(sid) = &self.state {
+            self.try_send_net(UdpPacket::Disconnected(sid.0))?;
+            self.state = UdpSessionState::Disconnected;
+        } else {
+            bail!("connection not established");
+        }
         Ok(())
     }
 
@@ -233,16 +260,37 @@ async fn udp_session(
         if !inbound {
             session.send_initiation().await?;
         }
+        let mut heartbeat_deadline = tokio::time::Instant::now()
+            .checked_add(HEARTBEAT_PERIOD)
+            .expect("reasonable time values");
+        let mut connection_timeout_deadline = tokio::time::Instant::now()
+            .checked_add(HEARTBEAT_PERIOD)
+            .expect("reasonable time values");
         loop {
             tokio::select! {
                 msg = from_net.recv() => {
                     let Some(msg) = msg else { break; };
                     let _ = session.handle_from_net(msg).await;
+                    connection_timeout_deadline = tokio::time::Instant::now()
+                        .checked_add(CONNECTION_TIMEOUT)
+                        .expect("reasonable time values");
                 },
                 msg = from_router.recv(), if session.is_ready() => {
                     let Some(msg) = msg else { break; };
                     let _ = session.handle_from_mesh(msg).await;
-                }
+                    heartbeat_deadline = tokio::time::Instant::now()
+                        .checked_add(HEARTBEAT_PERIOD)
+                        .expect("reasonable time values");
+                },
+                _ = tokio::time::sleep_until(heartbeat_deadline), if session.is_ready() => {
+                    heartbeat_deadline = tokio::time::Instant::now()
+                        .checked_add(HEARTBEAT_PERIOD)
+                        .expect("reasonable time values");
+                    let _ = session.send_heartbeat();
+                },
+                _ = tokio::time::sleep_until(connection_timeout_deadline), if session.is_ready() => {
+                    let _ = session.disconnect();
+                },
             }
             if matches!(session.state, UdpSessionState::Established(_))
                 && let Some(to_router) = to_router.take()
@@ -253,6 +301,15 @@ async fn udp_session(
                         None,
                     ))
                     .await;
+                heartbeat_deadline = tokio::time::Instant::now()
+                    .checked_add(HEARTBEAT_PERIOD)
+                    .expect("reasonable time values");
+                connection_timeout_deadline = tokio::time::Instant::now()
+                    .checked_add(CONNECTION_TIMEOUT)
+                    .expect("reasonable time values");
+            } else if matches!(session.state, UdpSessionState::Disconnected) {
+                log::info!("UDP connection with {:?} disconnected", addr);
+                break;
             }
         }
         Ok(()) as Result<()>
