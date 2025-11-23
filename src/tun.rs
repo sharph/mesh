@@ -79,7 +79,7 @@ impl TunPayload {
     }
 }
 
-fn handle_packet(
+async fn handle_packet(
     our_id: &PublicIdentity,
     packet: &Vec<u8>,
     tx: &mut Sender<RouterMessage>,
@@ -88,17 +88,17 @@ fn handle_packet(
     if tun_payload.from_addr.segments()[0..2] != [0xfc00, 0x35]
         || tun_payload.to_addr.segments()[0..2] != [0xfc00, 0x35]
     {
-        bail!("invalid packet from tun");
+        return Ok(()); // ignore random packets not directed towards our network
     }
     if tun_payload.from_addr != our_id.to_ipv6_address() {
         bail!("packet not from our mesh id");
     }
-    tx.try_send(RouterMessage::SendUnicast(UnicastMessage {
+    tx.send(RouterMessage::SendUnicast(UnicastMessage {
         to: proto::UnicastDestination::ShortId(tun_payload.to_addr.octets()[4..16].try_into()?),
         from: our_id.clone(),
         payload: proto::UnicastPayload(1, tun_payload.to_mesh_message()),
     }))
-    .unwrap();
+    .await?;
     Ok(())
 }
 
@@ -136,7 +136,9 @@ pub fn run_tun(
             tokio::select! {
                 Some(packet) = framed.next() => {
                     if let Ok(packet) = packet {
-                        let _ = handle_packet(&id, &packet.to_vec(), &mut unicast_out);
+                        if let Err(err) = handle_packet(&id, &packet.to_vec(), &mut unicast_out).await {
+                            error!("couldn't handle packet from tun {:?}", err);
+                        }
                     } else {
                         error!("couldn't get packet from tun");
                     }
