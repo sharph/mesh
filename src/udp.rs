@@ -127,7 +127,7 @@ impl UdpSession {
 
     fn send_heartbeat(&mut self) -> Result<()> {
         if let UdpSessionState::Established(sid) = &self.state {
-            self.try_send_net(UdpPacket::Establish(UdpSessionIdentity(
+            self.try_send_net(UdpPacket::Established(UdpSessionIdentity(
                 sid.0,
                 self.our_id.public_id.clone(),
             )))?;
