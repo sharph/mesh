@@ -26,6 +26,7 @@ pub struct UntaggedConnection(
 
 pub struct TaggedConnection(mpsc::Sender<RawMessage>, mpsc::Receiver<TaggedRawMessage>);
 
+#[derive(Debug)]
 struct Connection {
     connection_id: ConnectionId,
     id: Option<PublicIdentity>,
@@ -36,7 +37,6 @@ struct Connection {
 impl Connection {
     fn send_message(&mut self, message: RawMessage) -> Result<()> {
         if let Some(tx) = &self.tx {
-            let tx = tx.clone();
             if !tx.is_closed() {
                 if tx.try_send(message).is_err() {
                     log::error!("connection buffer full");
@@ -47,6 +47,16 @@ impl Connection {
             }
         }
         Ok(())
+    }
+
+    fn is_closed(&mut self) -> bool {
+        if let Some(tx) = &self.tx
+            && tx.is_closed()
+        {
+            log::info!("connection closed");
+            self.tx = None;
+        }
+        self.tx.is_none()
     }
 }
 
@@ -333,7 +343,19 @@ impl RouterState {
         id: Option<PublicIdentity>,
         router_tx: mpsc::Sender<RouterMessage>,
     ) -> Result<()> {
-        let conn_id = ConnectionId(self.connections.len() as u64);
+        let mut append = false;
+        let conn_id = ConnectionId(
+            self.connections
+                .iter_mut()
+                .enumerate()
+                .map(|(i, c)| (i.try_into(), c.is_closed()))
+                .find_map(|(i, c)| if c { Some(i) } else { None })
+                .unwrap_or_else(|| {
+                    append = true;
+                    self.connections.len().try_into()
+                })?,
+        );
+
         let inbound = connection.2;
         let TaggedConnection(tx, mut rx) = tag_connection(connection, conn_id);
         if let Some(some_id) = &id {
@@ -343,12 +365,22 @@ impl RouterState {
                 log::info!("adding new connection to {}", some_id.base64());
             }
         }
-        self.connections.push(Connection {
+        let tagged = Connection {
             connection_id: conn_id,
             id,
             tx: Some(tx),
             inbound,
-        });
+        };
+        if append {
+            log::trace!("appending connection {:?}", tagged);
+            self.connections.push(tagged);
+        } else {
+            log::trace!("replacing connection {:?} with {:?}", conn_id, tagged);
+            *self
+                .connections
+                .get_mut(conn_id.0 as usize)
+                .expect("conn_id index should exist") = tagged;
+        }
         tokio::task::spawn_local(async move {
             loop {
                 if let Some(msg) = rx.recv().await {
