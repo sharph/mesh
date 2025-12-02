@@ -79,20 +79,26 @@ impl PrivateIdentity {
 
 #[derive(Eq, PartialEq, Encode, Decode, Clone, Hash, Debug)]
 pub struct KeyExchangeMessage {
-    session_id: [u8; 8],
+    session_id: SessionId,
     public: [u8; 32],
+}
+
+impl KeyExchangeMessage {
+    pub fn get_session_id(&self) -> &SessionId {
+        &self.session_id
+    }
 }
 
 pub struct KeyExchange {
     secret: EphemeralSecret,
-    session_id: [u8; 8],
+    session_id: SessionId,
 }
 
 impl KeyExchange {
     pub fn new() -> Self {
         let mut osrng = OsRng;
         let secret = EphemeralSecret::random_from_rng(osrng);
-        let mut session_id: [u8; 8] = [0; 8];
+        let mut session_id: SessionId = [0; 8];
         osrng.fill(&mut session_id);
         Self { secret, session_id }
     }
@@ -109,6 +115,10 @@ impl KeyExchange {
             session_id: self.session_id,
             public: PublicKey::from(&self.secret).to_bytes(),
         }
+    }
+
+    pub fn get_session_id(&self) -> &SessionId {
+        &self.session_id
     }
 
     pub fn into_encryption_session(
@@ -132,8 +142,10 @@ impl KeyExchange {
     }
 }
 
+pub type SessionId = [u8; 8];
+
 pub struct EncryptionSession {
-    session_id: [u8; 8],
+    session_id: SessionId,
     key: Key<Aes256Gcm>,
     iv: [u8; 12],
 }
@@ -141,17 +153,27 @@ pub struct EncryptionSession {
 #[derive(Eq, PartialEq, Encode, Decode, Clone, Hash, Debug)]
 pub struct EncryptedMessage {
     pub iv: [u8; 12],
-    pub session_id: [u8; 8],
+    pub session_id: SessionId,
     pub ciphertext: Vec<u8>,
 }
 
+impl EncryptedMessage {
+    pub fn get_session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+}
+
 impl EncryptionSession {
-    pub fn new(session_id: [u8; 8], key: [u8; 32]) -> Self {
+    pub fn new(session_id: SessionId, key: [u8; 32]) -> Self {
         Self {
             session_id,
             key: key.into(),
             iv: Aes256Gcm::generate_nonce(OsRng).into(),
         }
+    }
+
+    pub fn get_session_id(&self) -> &SessionId {
+        &self.session_id
     }
 
     fn incr_iv(&mut self) {

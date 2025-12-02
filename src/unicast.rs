@@ -11,6 +11,8 @@ use tokio::{
     task::JoinHandle,
 };
 
+static KEX1_RESEND_PERIOD: std::time::Duration = tokio::time::Duration::from_secs(1);
+
 pub enum RouteManagementMessage {
     Add(Route),
     Delete(Route),
@@ -215,12 +217,18 @@ struct CryptoState {
     decrypt_session: Option<EncryptionSession>,
     encrypt_session: Option<EncryptionSession>,
     key_exchange: Option<KeyExchange>,
-    key_exchange_message: Option<KeyExchangeMessage>,
+    key_exchange_message_2: Option<KeyExchangeMessage>,
 }
 
 impl CryptoState {
     fn ready(&self) -> bool {
         self.encrypt_session.is_some()
+    }
+
+    fn reset_encryption_session(&mut self) {
+        self.encrypt_session = None;
+        self.key_exchange = None;
+        self.key_exchange_message_2 = None;
     }
 
     fn decrypt_mesh_message(&self, msg: &MeshMessage) -> Result<UnicastMessage> {
@@ -248,7 +256,7 @@ impl CryptoState {
     }
 
     fn should_send_kex_1(&self) -> bool {
-        self.encrypt_session.is_none() && self.key_exchange.is_none()
+        self.encrypt_session.is_none()
     }
 
     fn get_key_exchange_1(&mut self) -> KeyExchangeMessage {
@@ -259,19 +267,27 @@ impl CryptoState {
 
     fn handle_key_exchange_1(&mut self, kex_msg: &KeyExchangeMessage) -> Result<()> {
         let kex = KeyExchange::new_from_other_message(kex_msg);
+        if let Some(kex_2) = &self.key_exchange_message_2
+            && let Some(session) = &self.decrypt_session
+            && kex_msg.get_session_id() == kex_2.get_session_id()
+            && kex_msg.get_session_id() == session.get_session_id()
+        {
+            // don't recreate an already established session.
+            return Ok(());
+        }
         let public = kex.public();
         self.decrypt_session = Some(kex.into_encryption_session(kex_msg)?);
         log::debug!("decryption session set up!");
-        self.key_exchange_message = Some(public);
+        self.key_exchange_message_2 = Some(public);
         Ok(())
     }
 
     fn has_key_exchange_2(&self) -> bool {
-        self.key_exchange_message.is_some()
+        self.key_exchange_message_2.is_some()
     }
 
-    fn get_key_exchange_2(&mut self) -> Option<KeyExchangeMessage> {
-        self.key_exchange_message.take()
+    fn get_key_exchange_2(&mut self) -> Option<&KeyExchangeMessage> {
+        self.key_exchange_message_2.as_ref()
     }
 
     fn handle_key_exchange_2(&mut self, kex_msg: &KeyExchangeMessage) -> Result<()> {
@@ -289,6 +305,7 @@ enum UnicastOption {
     UnicastMessage(UnicastMessage),
     MeshMessage(MeshMessage),
     RouteManagement(RouteManagementMessage),
+    SendKex1,
     EndConnection,
 }
 
@@ -303,33 +320,16 @@ pub fn run_unicast_connection(
     let mut routes = Routes::new(tx.clone());
     log::info!("new unicast connection {:?}", their_id.base64());
     let mut crypto_state = CryptoState::default();
+    let mut resend_kex_1 = tokio::time::Instant::now();
     tokio::task::spawn_local(async move {
         loop {
             let has_route = routes.has_route();
             let ready = has_route && crypto_state.ready();
-            if has_route && let Some(route) = routes.get_route() {
-                if crypto_state.should_send_kex_1()
-                    && let Ok(msg) = MeshMessage::unicast_sign(
-                        &our_id,
-                        their_id.clone(),
-                        route.clone(),
-                        UnicastMessagePayload::KeyExchange1(crypto_state.get_key_exchange_1()),
-                    )
-                {
-                    let _ = tx.send(RouterMessage::SendMessage(msg)).await;
-                }
-                if let Some(kex2) = crypto_state.get_key_exchange_2()
-                    && let Ok(msg) = MeshMessage::unicast_sign(
-                        &our_id,
-                        their_id.clone(),
-                        route.clone(),
-                        UnicastMessagePayload::KeyExchange2(kex2),
-                    )
-                {
-                    let _ = tx.send(RouterMessage::SendMessage(msg)).await;
-                }
-            }
             let option = tokio::select! {
+                _ = tokio::time::sleep_until(resend_kex_1), if has_route && crypto_state.should_send_kex_1() => {
+                    resend_kex_1 = tokio::time::Instant::now().checked_add(KEX1_RESEND_PERIOD).expect("reasonable time value");
+                    UnicastOption::SendKex1
+                }
                 msg = unicast_sending_rx.recv(), if ready => {
                     // process messages only when encrypted path is setup
                     if let Some(msg) = msg {
@@ -354,6 +354,18 @@ pub fn run_unicast_connection(
                 }
             };
             match option {
+                UnicastOption::SendKex1 => {
+                    if let Some(route) = routes.get_route()
+                        && let Ok(msg) = MeshMessage::unicast_sign(
+                            &our_id,
+                            their_id.clone(),
+                            route.clone(),
+                            UnicastMessagePayload::KeyExchange1(crypto_state.get_key_exchange_1()),
+                        )
+                    {
+                        let _ = tx.send(RouterMessage::SendMessage(msg)).await;
+                    }
+                }
                 UnicastOption::MeshMessage(msg) => {
                     let MessagePayload::Unicast(unicast_msg_payload) = &msg.payload else {
                         continue;
@@ -363,14 +375,44 @@ pub fn run_unicast_connection(
                             if let Ok(uni_msg) = crypto_state.decrypt_mesh_message(&msg) {
                                 // convert a message from the mesh into a local message
                                 let _ = tx.send(RouterMessage::ReceiveUnicast(uni_msg)).await;
+                            } else if let MessagePayload::Unicast(
+                                UnicastMessagePayload::EncryptedPayload(enc_msg),
+                            ) = &msg.payload
+                                && let Some(route) = routes.get_route()
+                                && let Ok(msg_to_send) = MeshMessage::unicast_sign(
+                                    &our_id,
+                                    their_id.clone(),
+                                    route.clone(),
+                                    UnicastMessagePayload::CantDecrypt(*enc_msg.get_session_id()),
+                                )
+                            {
+                                let _ = tx.try_send(RouterMessage::SendMessage(msg_to_send));
                             }
-                            // TODO: fix broken sessions
+                        }
+                        UnicastMessagePayload::CantDecrypt(session_id) => {
+                            if let Some(our_session) = &crypto_state.encrypt_session
+                                && our_session.get_session_id() == session_id
+                                && msg.signature_valid().unwrap_or(false)
+                            {
+                                crypto_state.reset_encryption_session();
+                            }
                         }
                         UnicastMessagePayload::KeyExchange1(kex) => {
                             if !msg.signature_valid().unwrap_or(false) {
                                 continue;
                             }
                             let _ = crypto_state.handle_key_exchange_1(kex);
+                            if let Some(route) = routes.get_route()
+                                && let Some(kex2) = crypto_state.get_key_exchange_2()
+                                && let Ok(msg) = MeshMessage::unicast_sign(
+                                    &our_id,
+                                    their_id.clone(),
+                                    route.clone(),
+                                    UnicastMessagePayload::KeyExchange2(kex2.clone()),
+                                )
+                            {
+                                let _ = tx.send(RouterMessage::SendMessage(msg)).await;
+                            }
                         }
                         UnicastMessagePayload::KeyExchange2(kex) => {
                             if !msg.signature_valid().unwrap_or(false) {

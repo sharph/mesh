@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
     EncryptedMessage, EncryptionSession, KeyExchangeMessage, PrivateIdentity, PublicIdentity,
-    ShortId,
+    SessionId, ShortId,
 };
 
 pub const DEFAULT_TTL: u8 = 16;
@@ -41,6 +41,7 @@ pub enum UnicastMessagePayload {
     KeyExchange1(KeyExchangeMessage),
     KeyExchange2(KeyExchangeMessage),
     EncryptedPayload(EncryptedMessage),
+    CantDecrypt(SessionId),
     Ping(u16, std::time::SystemTime),
     Pong(u16, std::time::SystemTime),
 }
