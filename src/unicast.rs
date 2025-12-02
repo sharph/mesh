@@ -12,6 +12,7 @@ use tokio::{
 };
 
 static KEX1_RESEND_PERIOD: std::time::Duration = tokio::time::Duration::from_secs(1);
+static UNICAST_SESSION_TIMEOUT: std::time::Duration = tokio::time::Duration::from_secs(60);
 
 pub enum RouteManagementMessage {
     Add(Route),
@@ -321,6 +322,9 @@ pub fn run_unicast_connection(
     log::info!("new unicast connection {:?}", their_id.base64());
     let mut crypto_state = CryptoState::default();
     let mut resend_kex_1 = tokio::time::Instant::now();
+    let mut session_timeout = tokio::time::Instant::now()
+        .checked_add(UNICAST_SESSION_TIMEOUT)
+        .expect("expected reasonable time value");
     tokio::task::spawn_local(async move {
         loop {
             let has_route = routes.has_route();
@@ -329,6 +333,9 @@ pub fn run_unicast_connection(
                 _ = tokio::time::sleep_until(resend_kex_1), if has_route && crypto_state.should_send_kex_1() => {
                     resend_kex_1 = tokio::time::Instant::now().checked_add(KEX1_RESEND_PERIOD).expect("reasonable time value");
                     UnicastOption::SendKex1
+                }
+                _ = tokio::time::sleep_until(session_timeout) => {
+                    UnicastOption::EndConnection
                 }
                 msg = unicast_sending_rx.recv(), if ready => {
                     // process messages only when encrypted path is setup
@@ -374,6 +381,9 @@ pub fn run_unicast_connection(
                         UnicastMessagePayload::EncryptedPayload(_) => {
                             if let Ok(uni_msg) = crypto_state.decrypt_mesh_message(&msg) {
                                 // convert a message from the mesh into a local message
+                                session_timeout = tokio::time::Instant::now()
+                                    .checked_add(UNICAST_SESSION_TIMEOUT)
+                                    .expect("expected reasonable time value");
                                 let _ = tx.send(RouterMessage::ReceiveUnicast(uni_msg)).await;
                             } else if let MessagePayload::Unicast(
                                 UnicastMessagePayload::EncryptedPayload(enc_msg),
@@ -435,6 +445,9 @@ pub fn run_unicast_connection(
                     }
                 }
                 UnicastOption::UnicastMessage(msg) => {
+                    session_timeout = tokio::time::Instant::now()
+                        .checked_add(UNICAST_SESSION_TIMEOUT)
+                        .expect("expected reasonable time value");
                     if let Some(route) = routes.get_route()
                         && let Ok(msg) = crypto_state.encrypt_unicast_message(
                             their_id.clone(),
@@ -451,6 +464,7 @@ pub fn run_unicast_connection(
                 UnicastOption::EndConnection => break,
             };
         }
+        log::info!("unicast session with {:?} ended", their_id.base64());
     });
     UnicastConnection {
         route_management_tx,

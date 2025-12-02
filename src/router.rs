@@ -229,6 +229,11 @@ impl RouteDBEntry {
         if close {
             self.unicast_connection = None;
         }
+        if let Some(conn) = &self.unicast_connection
+            && conn.is_closed()
+        {
+            self.unicast_connection = None;
+        }
         self.seen.retain(|_route, instant| *instant >= *del_before);
     }
 
@@ -510,25 +515,24 @@ impl RouterState {
             log::debug!("no route to connect to {:?}", dest);
             bail!("no route")
         };
-        if route_db_entry.unicast_connection.is_none() {
-            route_db_entry.unicast_connection =
-                Some(run_unicast_connection(self.id.clone(), id, self.tx.clone()));
-            route_db_entry
+        if route_db_entry
+            .unicast_connection
+            .as_mut()
+            .is_none_or(|c| c.is_closed())
+        {
+            log::debug!("creating new connection for {:?}", dest);
+            let connection = route_db_entry
                 .unicast_connection
-                .as_mut()
-                .unwrap()
-                .add_route(
-                    route_db_entry
-                        .seen
-                        .first_key_value()
-                        .unwrap()
-                        .0
-                        .clone()
-                        .into_inner(),
-                )
-                .await?;
+                .insert(run_unicast_connection(self.id.clone(), id, self.tx.clone()));
+            if let Some(route) = route_db_entry.seen.first_key_value() {
+                let route = route.0.clone().into_inner();
+                connection.add_route(route).await?;
+            }
+            return Ok(connection);
+        } else if let Some(connection) = route_db_entry.unicast_connection.as_mut() {
+            return Ok(connection);
         }
-        Ok(route_db_entry.unicast_connection.as_mut().unwrap())
+        bail!("should have returned a connection");
     }
 
     async fn handle_unicast_for_us(&mut self, msg: MeshMessage) -> Result<()> {
