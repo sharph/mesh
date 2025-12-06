@@ -3,6 +3,7 @@ use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
 use log::error;
 use tokio::sync::mpsc::{Sender, channel};
+use tokio::task::JoinHandle;
 use tun_rs::DeviceBuilder;
 use tun_rs::async_framed::{BytesCodec, DeviceFramed};
 
@@ -10,7 +11,7 @@ use std::net::Ipv6Addr;
 
 use crate::crypto::{PublicIdentity, ShortId};
 use crate::proto::{self, UnicastMessage};
-use crate::router::RouterMessage;
+use crate::router::{RouterInterface, RouterMessage};
 
 impl PublicIdentity {
     pub fn to_ipv6_address(&self) -> Ipv6Addr {
@@ -82,7 +83,7 @@ impl TunPayload {
 async fn handle_packet(
     our_id: &PublicIdentity,
     packet: &Vec<u8>,
-    tx: &mut Sender<RouterMessage>,
+    router: &RouterInterface,
 ) -> Result<()> {
     let tun_payload = TunPayload::from_ipv6_packet(packet)?;
     if tun_payload.from_addr.segments()[0..2] != [0xfc00, 0x35]
@@ -93,12 +94,12 @@ async fn handle_packet(
     if tun_payload.from_addr != our_id.to_ipv6_address() {
         bail!("packet not from our mesh id");
     }
-    tx.send(RouterMessage::SendUnicast(UnicastMessage {
-        to: proto::UnicastDestination::ShortId(tun_payload.to_addr.octets()[4..16].try_into()?),
-        from: our_id.clone(),
-        payload: proto::UnicastPayload(1, tun_payload.to_mesh_message()),
-    }))
-    .await?;
+    router
+        .send_unicast(
+            proto::UnicastDestination::ShortId(tun_payload.to_addr.octets()[4..16].try_into()?),
+            proto::UnicastPayload(1, tun_payload.to_mesh_message()),
+        )
+        .await?;
     Ok(())
 }
 
@@ -117,10 +118,7 @@ async fn handle_from_mesh(
     Ok(())
 }
 
-pub fn run_tun(
-    id: &PublicIdentity,
-    mut unicast_out: Sender<RouterMessage>,
-) -> Result<Sender<proto::UnicastMessage>> {
+pub async fn run_tun(id: &PublicIdentity, router: RouterInterface) -> Result<JoinHandle<()>> {
     let (unicast_in_tx, mut unicast_in) = channel(64);
     let dev = DeviceBuilder::new()
         .ipv6(id.to_ipv6_address(), 32)
@@ -129,14 +127,16 @@ pub fn run_tun(
 
     let mut framed = DeviceFramed::new(dev, BytesCodec::new());
 
+    router.add_unicast_handler(1, unicast_in_tx).await?;
+
     let id = id.clone();
-    tokio::task::spawn_local(async move {
+    let join_handle = tokio::task::spawn_local(async move {
         let our_ip = id.to_ipv6_address();
         loop {
             tokio::select! {
                 Some(packet) = framed.next() => {
                     if let Ok(packet) = packet {
-                        if let Err(err) = handle_packet(&id, &packet.to_vec(), &mut unicast_out).await {
+                        if let Err(err) = handle_packet(&id, &packet.to_vec(), &router).await {
                             error!("couldn't handle packet from tun {:?}", err);
                         }
                     } else {
@@ -146,10 +146,12 @@ pub fn run_tun(
                 msg = unicast_in.recv() => {
                     if let Some(msg) = msg {
                         let _ = handle_from_mesh(&msg, &our_ip, &mut framed).await;
+                    } else {
+                        break;
                     }
                 }
             }
         }
     });
-    Ok(unicast_in_tx)
+    Ok(join_handle)
 }

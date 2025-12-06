@@ -2,13 +2,14 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::crypto::{self, PrivateIdentity, PublicIdentity, ShortId};
 use crate::proto::{
     ConnectionId, DEFAULT_TTL, MeshMessage, MessagePayload, RawMessage, Route, TaggedRawMessage,
-    UnicastDestination, UnicastMessage,
+    UnicastDestination, UnicastMessage, UnicastPayload,
 };
 use crate::tun;
 use crate::udp::run_udp;
@@ -328,6 +329,7 @@ struct RouterState {
     connections: Vec<Connection>,
     route_db: RouteDB,
     flood_db: FloodDB,
+    unicast_handlers: HashMap<u16, mpsc::Sender<UnicastMessage>>,
     tx: mpsc::Sender<RouterMessage>,
 }
 
@@ -338,6 +340,7 @@ impl RouterState {
             connections: Vec::new(),
             route_db: RouteDB::default(),
             flood_db: FloodDB::default(),
+            unicast_handlers: HashMap::default(),
             tx,
         }
     }
@@ -358,7 +361,8 @@ impl RouterState {
                 .unwrap_or_else(|| {
                     append = true;
                     self.connections.len().try_into()
-                })?,
+                })
+                .context("couldn't get new id for connection")?,
         );
 
         let inbound = connection.2;
@@ -402,6 +406,12 @@ impl RouterState {
             }
         });
         Ok(())
+    }
+
+    /// Returns true if a handler was replaced
+    fn add_unicast_handler(&mut self, port: u16, handler: mpsc::Sender<UnicastMessage>) -> bool {
+        log::debug!("registered unicast handler for port {}", port);
+        self.unicast_handlers.insert(port, handler).is_some()
     }
 
     fn send_to_all(&mut self, msg: MeshMessage, except: Option<ConnectionId>) -> Result<()> {
@@ -558,11 +568,11 @@ pub struct RouterConfig {
     pub websockets_connect: Vec<String>,
     pub udp_listen: Option<String>,
     pub udp_connect: Vec<String>,
-    pub tun: bool,
 }
 
 pub enum RouterMessage {
     AddConnection(UntaggedConnection, Option<PublicIdentity>),
+    AddUnicastHandler(u16, mpsc::Sender<UnicastMessage>),
     IncomingMessage(TaggedRawMessage),
     SendMessage(MeshMessage),
     SendUnicast(UnicastMessage),
@@ -570,16 +580,60 @@ pub enum RouterMessage {
     SendFlood,
 }
 
-pub async fn run_router(config: &RouterConfig) -> Result<()> {
+#[derive(Clone)]
+pub struct RouterInterface(mpsc::Sender<RouterMessage>, PrivateIdentity);
+
+impl RouterInterface {
+    pub async fn add_connection(
+        &self,
+        conn: UntaggedConnection,
+        id: Option<PublicIdentity>,
+    ) -> Result<()> {
+        Ok(self.0.send(RouterMessage::AddConnection(conn, id)).await?)
+    }
+
+    pub async fn add_unicast_handler(
+        &self,
+        port: u16,
+        handler: mpsc::Sender<UnicastMessage>,
+    ) -> Result<()> {
+        Ok(self
+            .0
+            .send(RouterMessage::AddUnicastHandler(port, handler))
+            .await?)
+    }
+
+    pub async fn send_message_to_mesh(&self, msg: MeshMessage) -> Result<()> {
+        Ok(self.0.send(RouterMessage::SendMessage(msg)).await?)
+    }
+
+    pub fn try_send_message_to_mesh(&self, msg: MeshMessage) -> Result<()> {
+        Ok(self.0.try_send(RouterMessage::SendMessage(msg))?)
+    }
+
+    pub async fn send_unicast(
+        &self,
+        to: UnicastDestination,
+        payload: UnicastPayload,
+    ) -> Result<()> {
+        Ok(self
+            .0
+            .send(RouterMessage::SendUnicast(UnicastMessage::new(
+                to,
+                self.1.public_id.clone(),
+                payload,
+            )))
+            .await?)
+    }
+}
+
+pub async fn run_router(
+    id: PrivateIdentity,
+    config: &RouterConfig,
+) -> Result<(JoinHandle<()>, RouterInterface)> {
     let (router_tx, mut rx) = mpsc::channel::<RouterMessage>(64);
 
-    let this_id = crypto::PrivateIdentity::new();
-    let id = this_id.clone();
-
-    log::info!("public id: {}", id.public_id);
-    log::info!("private key: {}", id.base64());
-
-    let mut state = RouterState::new(this_id.clone(), router_tx.clone());
+    let mut state = RouterState::new(id.clone(), router_tx.clone());
 
     let _listen_handles = config
         .websockets_listen
@@ -615,14 +669,6 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
         .await?;
     }
 
-    log::info!("your ipv6: {}", id.public_id.to_ipv6_address());
-    let mut tun_tx = if config.tun {
-        let id_for_tun = id.public_id.clone();
-        Some(tun::run_tun(&id_for_tun, router_tx.clone())?)
-    } else {
-        None
-    };
-
     let tx = router_tx.clone();
 
     tokio::task::spawn_local(async move {
@@ -634,33 +680,44 @@ pub async fn run_router(config: &RouterConfig) -> Result<()> {
         }
     });
 
-    loop {
-        if let Some(router_msg) = rx.recv().await {
-            match router_msg {
-                RouterMessage::AddConnection(conn, id) => {
-                    state.add_connection(conn, id, router_tx.clone())?
-                }
-                RouterMessage::IncomingMessage(msg) => {
-                    let _ = state.handle_message(msg).await;
-                }
-                RouterMessage::SendMessage(msg) => {
-                    let _ = state.send_message(msg);
-                }
-                RouterMessage::SendUnicast(msg) => {
-                    let _ = state.send_unicast_message(msg).await;
-                }
-                RouterMessage::ReceiveUnicast(msg) => {
-                    if let Some(ttx) = tun_tx.as_mut() {
-                        let _ = ttx.try_send(msg);
-                    } else {
-                        log::debug!("unhandled unicast: {msg:?}");
+    let interface = RouterInterface(router_tx.clone(), id);
+
+    let join_handle = tokio::task::spawn_local(async move {
+        log::info!("router started!");
+        loop {
+            if let Some(router_msg) = rx.recv().await {
+                match router_msg {
+                    RouterMessage::AddConnection(conn, id) => {
+                        if let Err(e) = state.add_connection(conn, id, router_tx.clone()) {
+                            log::error!("{}", e);
+                        }
                     }
-                }
-                RouterMessage::SendFlood => {
-                    let _ = state.send_flood();
-                    state.route_db.trim_routes().await;
+                    RouterMessage::AddUnicastHandler(port, tx) => {
+                        let _ = state.add_unicast_handler(port, tx);
+                    }
+                    RouterMessage::IncomingMessage(msg) => {
+                        let _ = state.handle_message(msg).await;
+                    }
+                    RouterMessage::SendMessage(msg) => {
+                        let _ = state.send_message(msg);
+                    }
+                    RouterMessage::SendUnicast(msg) => {
+                        let _ = state.send_unicast_message(msg).await;
+                    }
+                    RouterMessage::ReceiveUnicast(msg) => {
+                        if let Some(unicast_tx) = state.unicast_handlers.get_mut(&msg.payload.0) {
+                            let _ = unicast_tx.try_send(msg);
+                        } else {
+                            log::trace!("unhandled unicast: {msg:?}");
+                        }
+                    }
+                    RouterMessage::SendFlood => {
+                        let _ = state.send_flood();
+                        state.route_db.trim_routes().await;
+                    }
                 }
             }
         }
-    }
+    });
+    Ok((join_handle, interface))
 }

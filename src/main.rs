@@ -3,6 +3,8 @@
 use anyhow::Result;
 use clap_conf::prelude::*;
 
+use crate::{crypto::PrivateIdentity, tun::run_tun};
+
 mod crypto;
 mod packetizer;
 mod proto;
@@ -18,6 +20,7 @@ async fn main() -> Result<()> {
         (author: "Sharp Hall <sharp@sharphall.org>")
         (version: crate_version!())
         (@arg config: -c --config +takes_value "Sets a custom config file")
+        (@arg private_key: -p --private_key +takes_value "base64 encoded private key")
         (@arg listen_addresses: -l --ws_listen +takes_value "A comma separated list of bind addresses")
         (@arg connect_addresses: -C --ws_connect +takes_value "A comma separated list of addresses to connect to")
         (@arg udp_listen_address: -u --udp_listen +takes_value "The UDP address to bind to")
@@ -34,47 +37,80 @@ async fn main() -> Result<()> {
         .env("MESH_UDP_LISTEN_ADDRESS")
         .def("");
     let local = tokio::task::LocalSet::new();
+    let private_key = cfg
+        .grab()
+        .conf("identity.private_key")
+        .arg("private_key")
+        .env("MESH_IDENTITY_PRIVATE_KEY")
+        .def("");
+    let id = if private_key.is_empty() {
+        let new_id = PrivateIdentity::new();
+        log::info!("Created new private key: {}", new_id.base64());
+        new_id
+    } else {
+        match PrivateIdentity::from_base64(private_key.as_str()) {
+            Err(e) => {
+                log::error!("{}", e);
+                return Err(e);
+            }
+            Ok(id) => id,
+        }
+    };
+    log::info!("public id: {}", id.public_id.base64());
+
     local
         .run_until(async move {
-            router::run_router(&router::RouterConfig {
-                websockets_connect: cfg
-                    .grab()
-                    .conf("connect.addresses")
-                    .arg("connect_addresses")
-                    .env("MESH_WS_CONNECT_ADDRESSES")
-                    .def("")
-                    .split(",")
-                    .filter(|s| s != &"")
-                    .map(|s| s.to_string())
-                    .collect(),
-                websockets_listen: cfg
-                    .grab()
-                    .conf("listen.addresses")
-                    .arg("listen_addresses")
-                    .env("MESH_WS_LISTEN_ADDRESSES")
-                    .def("")
-                    .split(",")
-                    .filter(|s| s != &"")
-                    .map(|s| s.to_string())
-                    .collect(),
-                udp_listen: if !udp_listen.is_empty() {
-                    Some(udp_listen)
-                } else {
-                    None
+            let (router_join, router_interface) = router::run_router(
+                id.clone(),
+                &router::RouterConfig {
+                    websockets_connect: cfg
+                        .grab()
+                        .conf("connect.addresses")
+                        .arg("connect_addresses")
+                        .env("MESH_WS_CONNECT_ADDRESSES")
+                        .def("")
+                        .split(",")
+                        .filter(|s| s != &"")
+                        .map(|s| s.to_string())
+                        .collect(),
+                    websockets_listen: cfg
+                        .grab()
+                        .conf("listen.addresses")
+                        .arg("listen_addresses")
+                        .env("MESH_WS_LISTEN_ADDRESSES")
+                        .def("")
+                        .split(",")
+                        .filter(|s| s != &"")
+                        .map(|s| s.to_string())
+                        .collect(),
+                    udp_listen: if !udp_listen.is_empty() {
+                        Some(udp_listen)
+                    } else {
+                        None
+                    },
+                    udp_connect: cfg
+                        .grab()
+                        .conf("udp.connect.addresses")
+                        .arg("udp_connect_addresses")
+                        .env("MESH_UDP_CONNECT_ADDRESSES")
+                        .def("")
+                        .split(",")
+                        .filter(|s| s != &"")
+                        .map(|s| s.to_string())
+                        .collect(),
                 },
-                udp_connect: cfg
-                    .grab()
-                    .conf("udp.connect.addresses")
-                    .arg("udp_connect_addresses")
-                    .env("MESH_UDP_CONNECT_ADDRESSES")
-                    .def("")
-                    .split(",")
-                    .filter(|s| s != &"")
-                    .map(|s| s.to_string())
-                    .collect(),
-                tun: cfg.grab().arg("tun").def("false") == "true",
-            })
+            )
             .await?;
+
+            if cfg.grab().arg("tun").def("false") == "true" {
+                if let Err(e) = run_tun(&id.public_id, router_interface.clone()).await {
+                    log::error!("{}", e);
+                    router_join.abort();
+                } else {
+                    log::info!("your ipv6: {}", id.public_id.to_ipv6_address());
+                }
+            }
+            router_join.await?;
             Ok(()) as Result<()>
         })
         .await?;

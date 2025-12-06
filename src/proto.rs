@@ -63,6 +63,10 @@ pub struct UnicastMessage {
 }
 
 impl UnicastMessage {
+    pub fn new(to: UnicastDestination, from: PublicIdentity, payload: UnicastPayload) -> Self {
+        Self { to, from, payload }
+    }
+
     pub fn into_mesh_message(
         &self,
         to: PublicIdentity,

@@ -35,12 +35,6 @@ impl std::fmt::Display for PublicIdentity {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct PrivateIdentity {
-    private_key: [u8; 32],
-    pub public_id: PublicIdentity,
-}
-
 impl PublicIdentity {
     pub fn verify(&self, msg: Vec<u8>, signature: &SignatureBytes) -> Result<bool> {
         let verifying_key = VerifyingKey::from_bytes(&self.public_key)?;
@@ -51,6 +45,12 @@ impl PublicIdentity {
     pub fn base64(&self) -> String {
         BASE64_STANDARD.encode(self.public_key)
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct PrivateIdentity {
+    private_key: [u8; 32],
+    pub public_id: PublicIdentity,
 }
 
 impl PrivateIdentity {
@@ -64,6 +64,18 @@ impl PrivateIdentity {
                 public_key: *verifying_key.as_bytes(),
             },
         }
+    }
+
+    pub fn from_base64(base64: &str) -> Result<Self> {
+        let mut private_key: [u8; 32] = [0; 32];
+        BASE64_STANDARD.decode_slice(base64, &mut private_key)?;
+        let public_key = *SigningKey::from_bytes(&private_key)
+            .verifying_key()
+            .as_bytes();
+        Ok(Self {
+            private_key,
+            public_id: PublicIdentity { public_key },
+        })
     }
 
     pub fn sign(&self, msg: Vec<u8>) -> SignatureBytes {
