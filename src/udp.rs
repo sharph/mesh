@@ -164,11 +164,15 @@ impl UdpSession {
             }
             (UdpSessionState::Unconnected, UdpPacket::SessionMessage(sid, _)) => {
                 let _ = self.try_send_net(UdpPacket::Disconnected(sid));
+                self.state = UdpSessionState::Disconnected;
             }
             (UdpSessionState::Unconnected, UdpPacket::Established(sid)) => {
                 let _ = self.try_send_net(UdpPacket::Disconnected(sid.0));
+                self.state = UdpSessionState::Disconnected;
             }
-            (UdpSessionState::Unconnected, UdpPacket::Disconnected(_)) => {}
+            (UdpSessionState::Unconnected, UdpPacket::Disconnected(_)) => {
+                self.state = UdpSessionState::Disconnected;
+            }
             (UdpSessionState::Establishing(sid), UdpPacket::Establish(packet_sid)) => {
                 if sid != packet_sid.0 {
                     let _ = self.try_send_net(UdpPacket::Established(UdpSessionIdentity(
