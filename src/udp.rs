@@ -5,13 +5,15 @@ use std::time::Duration;
 use crate::crypto::{PrivateIdentity, PublicIdentity};
 use crate::packetizer::{Depacketizer, Packet, Packetizer};
 use crate::proto::{MeshMessage, RawMessage};
-use crate::router::{RouterMessage, UntaggedConnection};
-use anyhow::{Error, Result, bail};
+use crate::router::{RouterInterface, RouterMessage, UntaggedConnection};
+use anyhow::{Error, Result, anyhow, bail};
 use bincode::{Decode, Encode};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use tokio::net::{ToSocketAddrs, UdpSocket, lookup_host};
 use tokio::sync::mpsc::{Sender, channel};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 const MAX_PAYLOAD_SIZE: usize = 800;
 const HEARTBEAT_PERIOD: std::time::Duration = Duration::from_secs(1);
@@ -251,16 +253,16 @@ impl UdpSession {
 async fn udp_session(
     addr: SocketAddr,
     to_net: Sender<(SocketAddr, Vec<u8>)>,
-    router_tx: Sender<RouterMessage>,
+    router: RouterInterface,
     our_id: PrivateIdentity,
     inbound: bool,
-) -> Sender<Vec<u8>> {
+) -> (JoinHandle<Result<()>>, Sender<Vec<u8>>) {
     let (tx, mut from_net) = channel::<Vec<u8>>(64);
     let (tx_from_router, mut from_router) = channel::<RawMessage>(64);
     let (tx_to_router, to_router) = channel::<RawMessage>(1);
     let mut to_router = Some(to_router);
     let mut session = UdpSession::new(addr, to_net, tx_to_router, our_id);
-    tokio::task::spawn_local(async move {
+    let join_handle = tokio::task::spawn_local(async move {
         if !inbound {
             session.send_initiation().await?;
         }
@@ -268,7 +270,7 @@ async fn udp_session(
             .checked_add(HEARTBEAT_PERIOD)
             .expect("reasonable time values");
         let mut connection_timeout_deadline = tokio::time::Instant::now()
-            .checked_add(HEARTBEAT_PERIOD)
+            .checked_add(CONNECTION_TIMEOUT)
             .expect("reasonable time values");
         loop {
             tokio::select! {
@@ -292,19 +294,28 @@ async fn udp_session(
                         .expect("reasonable time values");
                     let _ = session.send_heartbeat();
                 },
-                _ = tokio::time::sleep_until(connection_timeout_deadline), if session.is_ready() => {
+                _ = tokio::time::sleep_until(connection_timeout_deadline) => {
                     let _ = session.disconnect();
+                    bail!("connection with {} timed out", addr);
                 },
             }
             if matches!(session.state, UdpSessionState::Established(_))
                 && let Some(to_router) = to_router.take()
             {
-                let _ = router_tx
-                    .send(RouterMessage::AddConnection(
+                if let Err(e) = router
+                    .add_connection(
                         UntaggedConnection(tx_from_router.clone(), to_router, inbound),
                         None,
-                    ))
-                    .await;
+                    )
+                    .await
+                {
+                    log::error!(
+                        "couldn't add UDP connection with {:?} to router: {:?}",
+                        addr,
+                        e
+                    );
+                    return Err(e);
+                }
                 heartbeat_deadline = tokio::time::Instant::now()
                     .checked_add(HEARTBEAT_PERIOD)
                     .expect("reasonable time values");
@@ -318,24 +329,44 @@ async fn udp_session(
         }
         Ok(()) as Result<()>
     });
-    tx
+    (join_handle, tx)
+}
+
+#[derive(Clone)]
+pub struct UDPServiceInterface(
+    Sender<(SocketAddr, oneshot::Sender<Result<JoinHandle<Result<()>>>>)>,
+);
+
+impl UDPServiceInterface {
+    pub async fn connect(&self, addr: SocketAddr) -> Result<JoinHandle<Result<()>>> {
+        let (tx, rx) = oneshot::channel::<Result<JoinHandle<Result<()>>>>();
+        self.0.send((addr, tx)).await?;
+        rx.await?
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
 }
 
 pub async fn run_udp<A>(
     addr: A,
-    router_tx: Sender<RouterMessage>,
+    router: RouterInterface,
     our_id: PrivateIdentity,
-    connect_list: Vec<A>,
-) -> Result<()>
+) -> Result<UDPServiceInterface>
 where
     A: ToSocketAddrs,
 {
     let (tx, mut rx) = channel::<(SocketAddr, Vec<u8>)>(64);
-    let (connect_tx, mut connect_rx) = channel::<SocketAddr>(1);
+    let (connect_tx, mut connect_rx) =
+        channel::<(SocketAddr, oneshot::Sender<Result<JoinHandle<Result<()>>>>)>(1);
     let mut sessions: HashMap<SocketAddr, Sender<Vec<u8>>> = HashMap::new();
     let sock = UdpSocket::bind(addr).await?;
     let mut buf = [0; 1024];
     tokio::task::spawn_local(async move {
+        if let Ok(sock_addr) = sock.local_addr() {
+            log::info!("UDP listening on {:?}", sock_addr);
+        }
         loop {
             tokio::select! {
                 res = sock.recv_from(&mut buf) => {
@@ -344,7 +375,7 @@ where
                         let _ = tx.try_send(buf[0..len].into());
                     } else {
                         log::info!("accepting UDP from {:?}", addr);
-                        let tx = udp_session(addr, tx.clone(), router_tx.clone(), our_id.clone(), true).await;
+                        let (_, tx) = udp_session(addr, tx.clone(), router.clone(), our_id.clone(), true).await;
                         let _ = tx.try_send(buf[0..len].into());
                         sessions.insert(addr, tx);
                     }
@@ -353,19 +384,19 @@ where
                     let Some((socket, data)) = received else { break; };
                     sock.send_to(data.as_slice(), socket).await.expect("addr type does not match");
                 },
-                Some(connect_to) = connect_rx.recv() => {
-                    let tx = udp_session(connect_to, tx.clone(), router_tx.clone(), our_id.clone(), false).await;
+                Some((connect_to, connect_return_tx)) = connect_rx.recv() => {
+                    if let Some(session) = sessions.get(&connect_to) && !session.is_closed() {
+                        let _ = connect_return_tx.send(Err(anyhow!("UDP connection already exists")));
+                        continue;
+                    }
+                    log::info!("connecting to {:?} with UDP", connect_to);
+                    let (join_handle, tx) = udp_session(connect_to, tx.clone(), router.clone(), our_id.clone(), false).await;
                     sessions.insert(connect_to, tx);
+                    let _ = connect_return_tx.send(Ok(join_handle));
                 }
             }
         }
         log::debug!("UDP ended");
     });
-    for connect_to in connect_list {
-        for socket_addr in lookup_host(connect_to).await? {
-            log::info!("connecting UDP to {:?}", socket_addr);
-            connect_tx.send(socket_addr).await?;
-        }
-    }
-    Ok(())
+    Ok(UDPServiceInterface(connect_tx))
 }

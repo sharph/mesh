@@ -566,8 +566,6 @@ impl RouterState {
 pub struct RouterConfig {
     pub websockets_listen: Vec<String>,
     pub websockets_connect: Vec<String>,
-    pub udp_listen: Option<String>,
-    pub udp_connect: Vec<String>,
 }
 
 pub enum RouterMessage {
@@ -659,15 +657,6 @@ pub async fn run_router(
             ))
         })
         .collect::<Vec<_>>();
-    if let Some(udp_listen) = &config.udp_listen {
-        run_udp(
-            udp_listen,
-            router_tx.clone(),
-            id.clone(),
-            config.udp_connect.iter().collect(),
-        )
-        .await?;
-    }
 
     let tx = router_tx.clone();
 

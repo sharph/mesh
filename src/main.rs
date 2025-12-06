@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap_conf::prelude::*;
+use tokio::{net::lookup_host, task::JoinHandle};
 
-use crate::{crypto::PrivateIdentity, tun::run_tun};
+use crate::{crypto::PrivateIdentity, tun::run_tun, udp::run_udp};
 
 mod crypto;
 mod packetizer;
@@ -83,24 +84,54 @@ async fn main() -> Result<()> {
                         .filter(|s| s != &"")
                         .map(|s| s.to_string())
                         .collect(),
-                    udp_listen: if !udp_listen.is_empty() {
-                        Some(udp_listen)
-                    } else {
-                        None
-                    },
-                    udp_connect: cfg
-                        .grab()
-                        .conf("udp.connect.addresses")
-                        .arg("udp_connect_addresses")
-                        .env("MESH_UDP_CONNECT_ADDRESSES")
-                        .def("")
-                        .split(",")
-                        .filter(|s| s != &"")
-                        .map(|s| s.to_string())
-                        .collect(),
                 },
             )
             .await?;
+
+            if !udp_listen.is_empty() {
+                let udp_interface =
+                    run_udp(udp_listen, router_interface.clone(), id.clone()).await?;
+                for addr in cfg
+                    .grab()
+                    .conf("udp.connect.addresses")
+                    .arg("udp_connect_addresses")
+                    .env("MESH_UDP_CONNECT_ADDRESSES")
+                    .def("")
+                    .split(",")
+                    .filter(|s| s != &"")
+                    .map(|s| s.to_string())
+                {
+                    let udp_connection_interface = udp_interface.clone();
+                    tokio::task::spawn_local(async move {
+                        loop {
+                            match udp_connection_interface
+                                .connect(
+                                    lookup_host(&addr)
+                                        .await?
+                                        .next()
+                                        .ok_or(anyhow!("address lookup failed"))?,
+                                )
+                                .await
+                            {
+                                Err(e) => {
+                                    if udp_connection_interface.is_closed() {
+                                        break;
+                                    }
+                                    log::error!("{}", e);
+                                }
+                                Ok(jh) => {
+                                    if let Err(e) = jh.await {
+                                        log::error!("{}", e);
+                                    };
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                    log::info!("reconnecting to {} over UDP", addr);
+                                }
+                            }
+                        }
+                        Ok(()) as Result<()>
+                    });
+                }
+            }
 
             if cfg.grab().arg("tun").def("false") == "true" {
                 if let Err(e) = run_tun(&id.public_id, router_interface.clone()).await {
