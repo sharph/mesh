@@ -382,7 +382,9 @@ where
                 },
                 received = rx.recv() => {
                     let Some((socket, data)) = received else { break; };
-                    sock.send_to(data.as_slice(), socket).await.expect("addr type does not match");
+                    if let Err(e) = sock.send_to(data.as_slice(), socket).await {
+                        log::error!("{}", e);
+                    }
                 },
                 Some((connect_to, connect_return_tx)) = connect_rx.recv() => {
                     if let Some(session) = sessions.get(&connect_to) && !session.is_closed() {
