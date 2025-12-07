@@ -563,11 +563,6 @@ impl RouterState {
     }
 }
 
-pub struct RouterConfig {
-    pub websockets_listen: Vec<String>,
-    pub websockets_connect: Vec<String>,
-}
-
 pub enum RouterMessage {
     AddConnection(UntaggedConnection, Option<PublicIdentity>),
     AddUnicastHandler(u16, mpsc::Sender<UnicastMessage>),
@@ -625,38 +620,10 @@ impl RouterInterface {
     }
 }
 
-pub async fn run_router(
-    id: PrivateIdentity,
-    config: &RouterConfig,
-) -> Result<(JoinHandle<()>, RouterInterface)> {
+pub async fn run_router(id: PrivateIdentity) -> Result<(JoinHandle<()>, RouterInterface)> {
     let (router_tx, mut rx) = mpsc::channel::<RouterMessage>(64);
 
     let mut state = RouterState::new(id.clone(), router_tx.clone());
-
-    let _listen_handles = config
-        .websockets_listen
-        .iter()
-        .map(|addr| {
-            log::info!("ws listening on {addr:?}");
-            tokio::task::spawn_local(listen_websockets(
-                router_tx.clone(),
-                id.clone(),
-                addr.clone(),
-            ))
-        })
-        .collect::<Vec<_>>();
-    let _connect_handles = config
-        .websockets_connect
-        .iter()
-        .map(|addr| {
-            log::info!("ws connecting to {addr:?}");
-            tokio::task::spawn_local(connect_websockets(
-                router_tx.clone(),
-                id.clone(),
-                addr.clone(),
-            ))
-        })
-        .collect::<Vec<_>>();
 
     let tx = router_tx.clone();
 

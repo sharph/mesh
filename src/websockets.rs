@@ -11,7 +11,7 @@ use tokio_websockets::{ClientBuilder, ServerBuilder, WebSocketStream};
 
 use crate::crypto::{PrivateIdentity, PublicIdentity};
 use crate::proto::RawMessage;
-use crate::router::{RouterMessage, UntaggedConnection};
+use crate::router::{RouterInterface, RouterMessage, UntaggedConnection};
 
 #[derive(Encode, Decode, Debug)]
 struct HelloMessage {
@@ -150,7 +150,7 @@ async fn run_websockets_connection<S>(
     mut wss: WebSocketStream<S>,
     id: PrivateIdentity,
     inbound: bool,
-) -> Result<(UntaggedConnection, Option<PublicIdentity>)>
+) -> Result<((UntaggedConnection, Option<PublicIdentity>), JoinHandle<()>)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -158,7 +158,7 @@ where
     let (in_tx, in_rx) = mpsc::channel(64);
     let (out_tx, mut out_rx) = mpsc::channel::<RawMessage>(64);
 
-    tokio::task::spawn_local(async move {
+    let join_handle = tokio::task::spawn_local(async move {
         loop {
             let from_ws = wss.next();
             let from_router = out_rx.recv();
@@ -183,14 +183,17 @@ where
         }
         log::info!("websockets disconnected");
     });
-    Ok((UntaggedConnection(out_tx, in_rx, inbound), Some(their_id)))
+    Ok((
+        (UntaggedConnection(out_tx, in_rx, inbound), Some(their_id)),
+        join_handle,
+    ))
 }
 
 pub async fn connect_websockets<A>(
-    connection_sender: mpsc::Sender<RouterMessage>,
+    router: &RouterInterface,
     id: PrivateIdentity,
     addr: A,
-) -> Result<()>
+) -> Result<JoinHandle<()>>
 where
     A: ToSocketAddrs,
 {
@@ -200,16 +203,17 @@ where
         .connect_on(stream)
         .await?
         .0;
-    let connection = run_websockets_connection(ws_stream, id, false).await?;
-    let _ = connection_sender
-        .send(RouterMessage::AddConnection(connection.0, connection.1))
-        .await;
+    let (connection, join_handle) = run_websockets_connection(ws_stream, id, false).await?;
+    if let Err(e) = router.add_connection(connection.0, connection.1).await {
+        log::error!("{}", e);
+        join_handle.abort();
+    }
     log::debug!("handshake successful");
-    Ok(())
+    Ok(join_handle)
 }
 
 pub async fn listen_websockets<A>(
-    connection_sender: mpsc::Sender<RouterMessage>,
+    router: RouterInterface,
     id: PrivateIdentity,
     addr: A,
 ) -> Result<JoinHandle<Result<()>>>
@@ -221,7 +225,7 @@ where
     let listening = tokio::task::spawn_local(async move {
         while let Ok((stream, _)) = listener.accept().await {
             log::info!("new websockets connection");
-            let tx = connection_sender.clone();
+            let connection_router = router.clone();
             let conn_id = id.clone();
             tokio::task::spawn_local(async move {
                 let Ok((_, ws_stream)) = ServerBuilder::new().accept(stream).await else {
@@ -229,11 +233,15 @@ where
                     return;
                 };
                 match run_websockets_connection(ws_stream, conn_id, true).await {
-                    Ok(connection) => {
+                    Ok((connection, join_handle)) => {
                         log::info!("websockets handshake successful");
-                        let _ = tx
-                            .send(RouterMessage::AddConnection(connection.0, connection.1))
-                            .await;
+                        if let Err(e) = connection_router
+                            .add_connection(connection.0, connection.1)
+                            .await
+                        {
+                            log::error!("{}", e);
+                            join_handle.abort();
+                        }
                     }
                     Err(err) => {
                         log::error!("handshake not successful");

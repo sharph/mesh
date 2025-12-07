@@ -2,9 +2,14 @@
 
 use anyhow::{Result, anyhow};
 use clap_conf::prelude::*;
-use tokio::{net::lookup_host, task::JoinHandle};
+use tokio::net::lookup_host;
 
-use crate::{crypto::PrivateIdentity, tun::run_tun, udp::run_udp};
+use crate::{
+    crypto::PrivateIdentity,
+    tun::run_tun,
+    udp::run_udp,
+    websockets::{connect_websockets, listen_websockets},
+};
 
 mod crypto;
 mod packetizer;
@@ -61,32 +66,55 @@ async fn main() -> Result<()> {
 
     local
         .run_until(async move {
-            let (router_join, router_interface) = router::run_router(
-                id.clone(),
-                &router::RouterConfig {
-                    websockets_connect: cfg
-                        .grab()
-                        .conf("connect.addresses")
-                        .arg("connect_addresses")
-                        .env("MESH_WS_CONNECT_ADDRESSES")
-                        .def("")
-                        .split(",")
-                        .filter(|s| s != &"")
-                        .map(|s| s.to_string())
-                        .collect(),
-                    websockets_listen: cfg
-                        .grab()
-                        .conf("listen.addresses")
-                        .arg("listen_addresses")
-                        .env("MESH_WS_LISTEN_ADDRESSES")
-                        .def("")
-                        .split(",")
-                        .filter(|s| s != &"")
-                        .map(|s| s.to_string())
-                        .collect(),
-                },
-            )
-            .await?;
+            let (router_join, router_interface) = router::run_router(id.clone()).await?;
+
+            for addr in cfg
+                .grab()
+                .conf("listen.addresses")
+                .arg("listen_addresses")
+                .env("MESH_WS_LISTEN_ADDRESSES")
+                .def("")
+                .split(",")
+                .filter(|s| s != &"")
+                .map(|s| s.to_string())
+            {
+                log::info!("listening websockets on {}", addr);
+                listen_websockets(router_interface.clone(), id.clone(), &addr).await?;
+            }
+
+            for addr in cfg
+                .grab()
+                .conf("connect.addresses")
+                .arg("connect_addresses")
+                .env("MESH_WS_CONNECT_ADDRESSES")
+                .def("")
+                .split(",")
+                .filter(|s| s != &"")
+                .map(|s| s.to_string())
+            {
+                let ws_connection_interface = router_interface.clone();
+                let ws_id = id.clone();
+                tokio::task::spawn_local(async move {
+                    loop {
+                        match connect_websockets(&ws_connection_interface, ws_id.clone(), &addr)
+                            .await
+                        {
+                            Err(e) => {
+                                log::error!("{}", e);
+                                break;
+                            }
+                            Ok(jh) => {
+                                if let Err(e) = jh.await {
+                                    log::error!("{}", e);
+                                };
+                            }
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        log::info!("reconnecting to {} over websockets", addr);
+                    }
+                    Ok(()) as Result<()>
+                });
+            }
 
             if !udp_listen.is_empty() {
                 let udp_interface =
@@ -123,10 +151,10 @@ async fn main() -> Result<()> {
                                     if let Err(e) = jh.await {
                                         log::error!("{}", e);
                                     };
-                                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                                    log::info!("reconnecting to {} over UDP", addr);
                                 }
                             }
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            log::info!("reconnecting to {} over UDP", addr);
                         }
                         Ok(()) as Result<()>
                     });
