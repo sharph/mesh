@@ -218,7 +218,7 @@ impl MeshMessage {
             self.payload.clone(),
             bincode::config::standard(),
         )?;
-        Ok(from.verify(serialized_payload, signature)?)
+        from.verify(serialized_payload, signature)
     }
 }
 

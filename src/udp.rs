@@ -4,13 +4,13 @@ use std::time::Duration;
 
 use crate::crypto::{PrivateIdentity, PublicIdentity};
 use crate::packetizer::{Depacketizer, Packet, Packetizer};
-use crate::proto::{MeshMessage, RawMessage};
-use crate::router::{RouterInterface, RouterMessage, UntaggedConnection};
+use crate::proto::RawMessage;
+use crate::router::{RouterInterface, UntaggedConnection};
 use anyhow::{Error, Result, anyhow, bail};
 use bincode::{Decode, Encode};
 use rand::RngCore;
 use rand::rngs::OsRng;
-use tokio::net::{ToSocketAddrs, UdpSocket, lookup_host};
+use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{Sender, channel};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;

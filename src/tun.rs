@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
 use log::error;
-use tokio::sync::mpsc::{Sender, channel};
+use tokio::sync::mpsc::channel;
 use tokio::task::JoinHandle;
 use tun_rs::DeviceBuilder;
 use tun_rs::async_framed::{BytesCodec, DeviceFramed};
@@ -10,8 +10,8 @@ use tun_rs::async_framed::{BytesCodec, DeviceFramed};
 use std::net::Ipv6Addr;
 
 use crate::crypto::{PublicIdentity, ShortId};
-use crate::proto::{self, UnicastMessage};
-use crate::router::{RouterInterface, RouterMessage};
+use crate::proto::{self};
+use crate::router::RouterInterface;
 
 impl PublicIdentity {
     pub fn to_ipv6_address(&self) -> Ipv6Addr {
@@ -29,7 +29,7 @@ impl PublicIdentity {
 }
 
 fn ipv6_to_unicast_destination(addr: Ipv6Addr) -> Result<proto::UnicastDestination> {
-    let short_id: ShortId = addr.octets()[4..32].try_into()?;
+    let short_id: ShortId = addr.octets()[4..16].try_into()?;
     Ok(proto::UnicastDestination::ShortId(short_id))
 }
 
@@ -112,7 +112,7 @@ async fn handle_from_mesh(
         bail!("we don't know how to handle a message with a short id")
     };
     let proto::UnicastPayload(_, payload) = &msg.payload;
-    let tun_payload = TunPayload::new(&msg.from, &to, &payload)?;
+    let tun_payload = TunPayload::new(&msg.from, to, payload)?;
     let bytes = BytesMut::try_from(tun_payload.to_ipv6_packet().as_slice())?;
     device.send(bytes).await?;
     Ok(())

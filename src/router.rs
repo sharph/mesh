@@ -6,15 +6,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::crypto::{self, PrivateIdentity, PublicIdentity, ShortId};
+use crate::crypto::{PrivateIdentity, PublicIdentity, ShortId};
 use crate::proto::{
     ConnectionId, DEFAULT_TTL, MeshMessage, MessagePayload, RawMessage, Route, TaggedRawMessage,
     UnicastDestination, UnicastMessage, UnicastPayload,
 };
-use crate::tun;
-use crate::udp::run_udp;
 use crate::unicast::{UnicastConnection, run_unicast_connection};
-use crate::websockets::{connect_websockets, listen_websockets};
 
 const FLOOD_DB_SIZE: usize = 1024 * 8;
 const FLOOD_ANNOUNCE_SEC: u64 = 10;
@@ -473,12 +470,9 @@ impl RouterState {
     }
 
     fn send_message(&mut self, mut msg: MeshMessage) -> Result<()> {
-        match msg.payload {
-            MessagePayload::Unicast(_) => {
-                let dest = msg.route.pop_front().ok_or(anyhow!("no route!"))?;
-                self.send_to(msg, dest)?;
-            }
-            _ => {}
+        if let MessagePayload::Unicast(_) = msg.payload {
+            let dest = msg.route.pop_front().ok_or(anyhow!("no route!"))?;
+            self.send_to(msg, dest)?;
         }
         Ok(())
     }

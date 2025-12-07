@@ -11,7 +11,7 @@ use tokio_websockets::{ClientBuilder, ServerBuilder, WebSocketStream};
 
 use crate::crypto::{PrivateIdentity, PublicIdentity};
 use crate::proto::RawMessage;
-use crate::router::{RouterInterface, RouterMessage, UntaggedConnection};
+use crate::router::{RouterInterface, UntaggedConnection};
 
 #[derive(Encode, Decode, Debug)]
 struct HelloMessage {
